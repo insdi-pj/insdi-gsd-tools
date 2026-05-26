@@ -58,41 +58,55 @@ The §8.2 watch-item flag on Vault is preserved: keep an eye on read load from G
 
 Follow the principles in `_shared/INSDI_GSD_PRINCIPLES.md`. The shape below is a starting point — refine during `/gsd-discuss-phase` for each milestone.
 
-### M1 — Bare CRUD, no auth, conventions-correct
+### M1 — Bare CRUD, no auth, conventions-correct, MCP parity
 
-**Goal:** A FastAPI Lambda exposing the basic trust-entity CRUD under correct §8.4 URL structure, response shapes, error envelopes, and pagination. Routes accept `X-Debug-Principal-Id` header to inject an AdminUser ID; no JWT validation.
+**Goal:** A FastAPI Lambda exposing the basic trust-entity CRUDLS under correct §8.4 URL structure, response shapes, error envelopes, and pagination — on **both** the REST surface (`/v1/admin/...`) and the MCP surface (`/mcp`). Routes accept `X-Debug-Principal-Id` header; MCP server reads `INSDI_DEBUG_PRINCIPAL_ID` env var. No JWT validation.
 
 A human can:
-- Create an Organisation
-- Create a Workspace inside it
-- Create AdminUsers and assign Memberships
-- Create EndUsers
-- List and search the above
-- See proper RFC 9457 errors when things go wrong
+- Create an Organisation, Workspace, AdminUser, Membership, EndUser via curl AND via MCP Inspector
+- List, read, update, delete, search the above on both surfaces
+- See proper RFC 9457 errors when things go wrong on both surfaces
 
 **Phases (sketch — confirm in `/gsd-discuss-phase 1`):**
 
-- **P1 — Scaffold:** Repo layout (per `INSDI_API_CONVENTIONS.md` "Service Lambda anatomy"), SAM template, FastAPI app skeleton, Postgres via Docker locally, Alembic baseline, structured logger, error envelope builder, cursor-pagination helper, operator-suffix filter parser. **Decide on the `_commons_pending/` convention here.**
-- **P2 — Organisation CRUD:** Three-schema Pydantic (`OrganisationCreateInput`, `OrganisationUpdateInput`, `OrganisationResponse`); SQLAlchemy ORM; Alembic migration; routes `POST /v1/admin/organisations`, `GET /v1/admin/organisations`, `GET /v1/admin/organisations/{org_id}`, `PATCH /v1/admin/organisations/{org_id}`, `DELETE /v1/admin/organisations/{org_id}`. No `/search`. Tests for create, list (cursor pagination), update, delete, 404 conflation behaviour.
-- **P3 — Workspace CRUD:** ORM, schemas, routes under `/v1/admin/organisations/{org_id}/workspaces` (nested per §8.4 §3.3 — Workspace has no identity outside Org for enumeration purposes; but `/v1/admin/workspaces/{ws_id}` exists for direct addressing). Foreign-key references to Organisation.
-- **P4 — AdminUser + Membership:** AdminUser ORM/schemas, routes under `/v1/admin/admin-users`. Membership join table; routes under `/v1/admin/organisations/{org_id}/memberships`. The `X-Debug-Principal-Id` header now refers to AdminUser IDs.
-- **P5 — WorkspaceMembership:** Routes for WS-level membership assignment under `/v1/admin/workspaces/{ws_id}/memberships`.
-- **P6 — EndUser CRUD:** ORM, schemas, routes under `/v1/home/end-users/{id}` (note: home namespace because end users access this themselves) and `/v1/admin/end-users/{id}` (admin-side view; M1 still no real auth).
-- **P7 — Search:** `POST /v1/admin/organisations/search`, `POST /v1/admin/admin-users/search`, `POST /v1/admin/end-users/search`. **Workspaces and Memberships are deliberately GET-only per §8.4 §4.3.**
-- **P8 — Polish:** Documentation, README, end-to-end manual test script, OpenAPI schema sanity check (FastAPI auto-generates it; verify it conforms to §8.4 §1.3 naming).
+Each phase delivers REST routes AND matching MCP tools in the same PR per the principles doc §3 — never one without the other.
+
+- **P1 — Scaffold:** Repo layout per `INSDI_API_CONVENTIONS.md` "Service Lambda anatomy" (including `mcp/` directory). SAM template, FastAPI app skeleton with MCP server mounted at `/mcp` via streamable HTTP, Postgres via Docker locally, Alembic baseline, structured logger, error envelope builder (used by both REST and MCP), cursor-pagination helper (used by both), operator-suffix filter parser. **Decide on the `_commons_pending/` convention here.** Smoke-test: launch the service, hit `/healthz` via curl, connect MCP Inspector to `/mcp` and verify it lists 0 tools without error. The scaffold proves both surfaces work before any entity is added.
+
+- **P2 — Organisation CRUDLS:**
+  - Schemas: `OrganisationCreateInput`, `OrganisationUpdateInput`, `OrganisationResponse`
+  - ORM: SQLAlchemy `Organisation` model
+  - Use-case functions in `services/organisations.py`: `create_organisation`, `read_organisation`, `update_organisation`, `delete_organisation`, `list_organisations`, `search_organisations` (search added in P7? confirm during discuss — recommend it lands in P2 alongside the rest, since the use-case function is small)
+  - REST routes in `api/v1/admin/organisations.py`: `POST /v1/admin/organisations`, `GET`, `GET /{id}`, `PATCH /{id}`, `DELETE /{id}`, `POST /search` (if shipped in P2)
+  - MCP tools in `mcp/tools/organisations.py`: `organisations.create`, `organisations.read`, `organisations.update`, `organisations.delete`, `organisations.list`, `organisations.search`
+  - Tests in `tests/services/`, `tests/api/`, `tests/mcp/` — three parallel suites
+  - Acceptance: every operation works via curl AND via MCP Inspector
+
+- **P3 — Workspace CRUDLS:** Same shape as P2. REST: routes under `/v1/admin/organisations/{org_id}/workspaces` (nested enumeration) and `/v1/admin/workspaces/{ws_id}` (direct addressing). MCP: `workspaces.create`, `.read`, `.update`, `.delete`, `.list` (no `.search` — small enumeration per §8.4 §4.3). FK references to Organisation. Foreign-key validation produces `422 validation.field_invalid` or similar on both surfaces.
+
+- **P4 — AdminUser + Membership CRUDLS:** AdminUser entity with CRUDLS on both surfaces. Membership join entity with create/list/delete (Memberships are typically not updated — confirm). REST under `/v1/admin/admin-users` and `/v1/admin/organisations/{org_id}/memberships`. MCP: `admin_users.{create,read,update,delete,list,search}`, `memberships.{create,list,delete}`. The `X-Debug-Principal-Id` header / `INSDI_DEBUG_PRINCIPAL_ID` env var now refers to AdminUser IDs.
+
+- **P5 — WorkspaceMembership CRUDLS (limited):** Routes under `/v1/admin/workspaces/{ws_id}/memberships`. MCP: `workspace_memberships.{create,list,delete}`. No update on WorkspaceMembership (you remove and re-add to change role — confirm).
+
+- **P6 — EndUser CRUDLS:** EndUser entity. REST under `/v1/home/end-users/{id}` (home namespace because end users access this themselves) and `/v1/admin/end-users/{id}` (admin-side view; M1 still no real auth). MCP: `end_users.{create,read,update,delete,list,search}`. **Decision to grill:** in M1 with no real auth, the home vs admin distinction is symbolic. Do we expose two MCP tool sets (one per audience) or just one? Recommendation: single `end_users.*` tool set in M1 since there's no real audience separation yet; the per-audience MCP server split per §8.4 §9.1 lands in M4.
+
+- **P7 — Polish:** Documentation, README, end-to-end manual test script that exercises every CRUDLS operation via curl AND a parallel script via MCP Inspector (or a saved Inspector session export). OpenAPI sanity check; verify the MCP `tools/list` response is correctly formed.
 
 **Decisions GSD should surface during `/gsd-discuss-phase 1`:**
 - Three-schema Pydantic — confirm naming convention (`OrganisationCreateInput` vs `CreateOrganisation` vs `OrganisationCreate`); see PJ's memory for prior decisions
 - `_commons_pending/` convention details (sub-structure, naming, header comment exact wording)
+- MCP library choice — `fastapi-mcp`, `mcp-server-fastmcp`, hand-rolled, or commons-pending — the MCP server framework is a foundation decision affecting every service; pick once
 - Whether the Organisation has a `slug` field, what slug rules look like (DNS-safe? case? length?)
-- Whether Workspace's parent is by URL nesting (`/organisations/{org_id}/workspaces`) only, or also by request body (`POST /workspaces` with `workspace.organisation_id`)
+- Whether Workspace's parent is by URL nesting (`/organisations/{org_id}/workspaces`) only, or also by request body (`POST /workspaces` with `workspace.organisation_id`); for MCP, the parent is always in the input model
 - Cursor encoding details — what fields encode in the cursor when sort is `created_at desc, id desc`; how to encode the case where a custom sort is applied
+- Whether `.search` ships with each entity's first phase (recommended) or as a separate phase at the end
+- Single-MCP-server in M1 vs two MCP servers (one per `admin`/`home` audience) — recommend single in M1, split in M4
 
 **Out of scope for M1 (deferred):**
 - Any JWT validation
 - Cognito user pools (no pools exist yet — there's nothing to validate against)
 - Any audit emission
-- ETags, If-Match, Idempotency-Key enforcement (header may be accepted, ignored, marked in OpenAPI as M2)
+- ETags, If-Match, Idempotency-Key enforcement (header may be accepted, ignored, marked in OpenAPI as M2). MCP `idempotency_key` input parameter similarly accepted-but-ignored.
 - Rate limiting
 - RDS Proxy (M4); use direct Postgres locally
 - Domain verification flows (M5)
@@ -181,11 +195,12 @@ These layer in over multiple milestones. Order is suggested; refine when actuall
 - **VerifiedDomain + domain verification flows** — DNS TXT / HTML meta / email-challenge per §8.6 §5.1; per-Org `domain_restriction_enabled` toggle and grandfathering UX per §8.6 §6.1–6.2
 - **Federation (FederatedIdpConfig):** Self-serve SSO config via `AdminCreateIdentityProvider`; domain-based routing on login per §8.6 §2
 - **Custom login page:** No Cognito hosted UI; domain-routed login per §8.6 §2.4
-- **AgentGrant + OAuth Authorization Code with PKCE:** Endpoints `/v1/auth/oauth/{authorize, consent, token, revoke}` per §8.4 §8.2; bounded-by-AdminUser invariant per §8.6 §8.4 / §8.4 §8.4
+- **AgentGrant + OAuth Authorization Code with PKCE:** Endpoints `/v1/auth/oauth/{authorize, consent, token, revoke}` per §8.4 §8.2; bounded-by-AdminUser invariant per §8.6 §8.4 / §8.4 §8.4. Each new endpoint ships with its matching MCP tool (e.g. `agent_grants.create`, `agent_grants.revoke`).
 - **Link-scoped JWT signing:** `commons.platform_auth.issue_link_scoped_jwt` (signing key in Platform-owned KMS); JWKS publication at `/.well-known/jwks.json` per §8.4 §10
-- **Vault + PGVector:** EndUser pre-fill data
-- **Erasure coordination:** Cross-service erasure event publishing and collection per §8.2 §3.7 (`enduser.erasure-requested` / `enduser.erasure-completed`)
-- **MCP surface:** Co-located with REST per §8.4 §9.3; admin-pool and end-user-pool MCP servers; MCP session state in DynamoDB per §8.4 §9.9
+- **Vault + PGVector:** EndUser pre-fill data. Adds `vault_entries.*` MCP tools alongside REST routes.
+- **Erasure coordination:** Cross-service erasure event publishing and collection per §8.2 §3.7 (`enduser.erasure-requested` / `enduser.erasure-completed`). Adds erasure-management MCP tools.
+- **MCP production architecture** (M4 per principles doc, not M5): Split `/mcp` per-service-Lambda into the canonical `mcp.insdi.com/{admin,home,public}` audience servers per §8.4 §9.1; OAuth-at-session-start per §8.4 §8; `/.well-known/mcp` discovery; MCP session state in DynamoDB. **Platform owns this work** since it's the auth/identity surface. Other services contribute MCP fragments that Platform's assembler combines.
+- **MCP Prompts and Resources content (M5+):** Curated workflow prompts per §8.4 §9.8 ("Onboard a new tenant", "Set up SSO", etc.). Reference Resources like `insdi://docs/auth-floors`, `insdi://orgs/{org_id}/policies`. Resolves §8.4 OQ-A (content source-of-truth).
 - **Per-Org KMS keys:** For envelope encryption of sensitive fields; provisioned via `insdi-infra` CDK
 
 ---
@@ -265,9 +280,24 @@ GET    /.well-known/openapi.json                  # M4
 GET    /v1/openapi.json                           # M4
 GET    /.well-known/jwks.json                     # M5
 GET    /.well-known/oauth-authorization-server    # M5
-GET    /.well-known/mcp                           # MCP milestone (later)
+GET    /.well-known/mcp                           # M4 (MCP per-audience server split)
 GET    /.well-known/health                        # M1 or M2
 ```
+
+### MCP tool surface (M1)
+
+Mirrors the REST surface above. Single MCP endpoint at `/mcp` on the service Lambda. CRUDLS naming, snake_case namespaces:
+
+```
+organisations.{create, read, update, delete, list, search}
+workspaces.{create, read, update, delete, list}
+admin_users.{create, read, update, delete, list, search}
+memberships.{create, list, delete}
+workspace_memberships.{create, list, delete}
+end_users.{create, read, update, delete, list, search}
+```
+
+In M4, these split into per-audience MCP servers per §8.4 §9.1.
 
 ### Resource-name discipline
 
@@ -297,9 +327,13 @@ For Workspace, the computation walks `Workspace → Organisation`. For Templates
 
 ## 5. M1 acceptance criteria (the runnable bar)
 
-When M1 is "done," a human with curl and a fresh local Postgres can:
+When M1 is "done," **both surfaces work**.
 
-1. `POST /v1/admin/organisations` with `X-Debug-Principal-Id: au_dev_1` and a valid body → returns 201 + Organisation response
+### REST (curl)
+
+With `X-Debug-Principal-Id: au_dev_1` against a fresh local Postgres:
+
+1. `POST /v1/admin/organisations` with a valid body → returns 201 + Organisation response
 2. `GET /v1/admin/organisations/{id}` → returns 200 + the same Organisation
 3. `GET /v1/admin/organisations` → returns 200 + `{ items, page }` envelope with cursor pagination
 4. `GET /v1/admin/organisations?name[contains]=foo&created_at[gte]=2026-01-01` → returns 200 with filter applied
@@ -311,7 +345,24 @@ When M1 is "done," a human with curl and a fresh local Postgres can:
 10. Workspaces, AdminUsers, EndUsers, Memberships all work the same way
 11. The OpenAPI doc at `/openapi.json` (FastAPI's auto-generated one) shows all routes correctly namespaced and named
 
-No JWT validation. No audit. No idempotency key required. No rate limiting. No ETag.
+### MCP (MCP Inspector)
+
+With the service running under `INSDI_DEBUG_PRINCIPAL_ID=au_dev_1`, connect MCP Inspector to `http://localhost:8000/mcp` and:
+
+1. `tools/list` enumerates all expected CRUDLS tools across all entities — `organisations.{create,read,update,delete,list,search}`, `workspaces.{create,read,update,delete,list}`, `admin_users.*`, `memberships.*`, `workspace_memberships.*`, `end_users.*`
+2. `organisations.create` with a valid input → returns the Organisation response object
+3. `organisations.read` with the new ID → returns the same Organisation
+4. `organisations.list` with `cursor=null, limit=10` → returns `{ items, page }` envelope
+5. `organisations.search` with a complex `filter` input → returns 200; complexity > limit → returns `isError: true` with `validation.query_too_complex` problem+json body
+6. `organisations.read` with `does_not_exist` → returns `isError: true` with `not_found.organisation` problem+json body
+7. All other entities have parallel tool sets that work
+8. Each tool description includes insdi-specific notes (e.g. "Returns computed `effective_*` fields in response")
+
+### Parity check
+
+Verify that for the same operation, REST and MCP produce **equivalent** responses (same Pydantic model, same field values, same error codes). A test that creates an Organisation via REST and reads it via MCP (and vice versa) should round-trip cleanly.
+
+No JWT validation on either surface. No audit. No idempotency key enforced. No rate limiting. No ETag. Just CRUDLS, both surfaces, conventions correct.
 
 ---
 

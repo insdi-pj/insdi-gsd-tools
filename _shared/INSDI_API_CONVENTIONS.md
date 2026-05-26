@@ -29,7 +29,9 @@ This document captures the §8.4 rules that come up most often during implementa
 | `/v1/auth/*` | mixed / none | Anyone |
 | `/.well-known/*` | none | Anyone |
 
-In M1, the auth dependencies are placeholders that read `X-Debug-Principal-Id` instead of validating JWTs. Routes still go under the correct namespace from day one.
+In M1, the auth dependencies are placeholders that read `X-Debug-Principal-Id` instead of validating JWTs. Routes still go under the correct namespace from day one. MCP tools in M1 read the equivalent principal from `INSDI_DEBUG_PRINCIPAL_ID` env var set at server start.
+
+A note on namespaces and MCP: MCP tools don't carry a namespace prefix in their name (a tool is `templates.create`, not `admin.templates.create`). In M1–M3 with the single `/mcp` endpoint per service, this is fine because the entire endpoint serves admin-equivalent tools. In M4+ the per-audience server split (`mcp.insdi.com/{admin,home,public}` per §8.4 §9.1) is what carries audience separation; tool names stay flat.
 
 ## Path conventions
 
@@ -322,7 +324,9 @@ X-RateLimit-Bucket: org
 
 ---
 
-## Headers — quick reference
+## Headers — quick reference (REST)
+
+These apply to REST requests/responses. MCP has its own equivalents (per-call input parameters or session-level mechanisms) — see the MCP surface section below.
 
 | Header | Direction | Required from | Purpose |
 |---|---|---|---|
@@ -366,7 +370,7 @@ Every service Lambda repo has the same shape (established in M1 P1):
 ```
 service-name/
 ├── README.md
-├── pyproject.toml                  # FastAPI, SQLAlchemy v2, Pydantic v2, Alembic, boto3
+├── pyproject.toml                  # FastAPI, SQLAlchemy v2, Pydantic v2, Alembic, boto3, fastapi-mcp or equivalent
 ├── template.yaml                   # SAM template
 ├── alembic.ini
 ├── migrations/
@@ -374,27 +378,193 @@ service-name/
 ├── src/
 │   └── <service_name>/
 │       ├── __init__.py
-│       ├── main.py                 # FastAPI app, middleware, router registration
+│       ├── main.py                 # FastAPI app, middleware, router and MCP server registration
 │       ├── config.py               # Pydantic BaseSettings
 │       ├── db.py                   # SQLAlchemy engine, session factory
 │       ├── deps.py                 # FastAPI dependencies (RequireAdmin etc. — M2)
-│       ├── errors.py               # Error envelope builder, RFC 9457
+│       ├── errors.py               # Error envelope builder, RFC 9457 (used by both REST + MCP)
 │       ├── pagination.py           # Cursor encode/decode, filter parser
 │       ├── api/
 │       │   └── v1/
-│       │       ├── admin/          # /v1/admin/* routes
-│       │       ├── home/           # /v1/home/* routes (only where applicable)
-│       │       ├── public/         # /v1/public/* routes (only where applicable)
-│       │       └── auth/           # /v1/auth/* routes (only where applicable)
+│       │       ├── admin/          # /v1/admin/* REST routes
+│       │       ├── home/           # /v1/home/* REST routes (only where applicable)
+│       │       ├── public/         # /v1/public/* REST routes (only where applicable)
+│       │       └── auth/           # /v1/auth/* REST routes (only where applicable)
+│       ├── mcp/                    # MCP surface — co-located per §8.4 §9.3
+│       │   ├── server.py           # MCP server setup, mounted at /mcp on the FastAPI app
+│       │   ├── deps.py             # MCP-specific deps (UserContext resolution from session)
+│       │   └── tools/              # One file per entity: organisations.py, workspaces.py, etc.
 │       ├── models/                 # SQLAlchemy ORMs (or imports from insdi-commons)
-│       ├── schemas/                # Pydantic models (or imports from insdi-commons)
-│       ├── services/               # Use-case functions (business logic; called by handlers)
+│       ├── schemas/                # Pydantic models (or imports from insdi-commons) — used by REST AND MCP
+│       ├── services/               # Use-case functions (business logic) — called by BOTH REST handlers AND MCP tools
 │       └── _commons_pending/       # Temporary local impls of would-be-commons code
 ├── tests/
+│   ├── services/                   # Use-case function tests (pure business logic)
+│   ├── api/                        # REST handler tests
+│   └── mcp/                        # MCP tool tests
 └── .gitignore
 ```
 
-The **use-case function** pattern (services/) is mandated by §8.4 §1.4: route handlers are thin shape-adapters that delegate to use-case functions. This enables future MCP tool definitions to call the same use-case function the REST handler does, structurally enforcing "one state machine, two surfaces". Even before MCP arrives, this pattern is followed.
+The **use-case function** pattern (`services/`) is mandated by §8.4 §1.4 and is what makes MCP parity structurally enforceable. REST handlers in `api/` and MCP tools in `mcp/tools/` are both thin shape-adapters delegating to the same function in `services/`. The same Pydantic schemas in `schemas/` are used by both surfaces (REST as request/response body, MCP as `inputSchema`/`outputSchema`). Tests cover all three layers — the use-case function for business logic, the REST handler for HTTP-specific shape, the MCP tool for MCP-specific shape.
+
+A new entity's CRUDLS phase therefore touches: `models/<entity>.py`, `schemas/<entity>.py`, `services/<entity>.py`, `api/v1/admin/<entity>.py`, `mcp/tools/<entity>.py`, `tests/services/<entity>.py`, `tests/api/<entity>.py`, `tests/mcp/<entity>.py`, plus a migration. That's deliberate — every layer is thin, but every layer is present.
+
+---
+
+## MCP surface
+
+Per §8.4 §9 and `INSDI_GSD_PRINCIPLES.md` §3, MCP is co-located with REST in every service Lambda and is built alongside REST from M1 P1. This section captures the M1–M3 MCP-specific conventions; the M4+ split into per-audience servers, OAuth at session start, etc. is deferred per the principles doc.
+
+### Transport
+
+**Streamable HTTP only** (the current MCP transport per the 2025-03-26 MCP spec). Each service Lambda mounts an MCP server at `/mcp` on its FastAPI app. The same uvicorn process serves both REST (under `/v1/...`) and MCP (under `/mcp`).
+
+No stdio. No SSE legacy.
+
+### Tool naming — CRUDLS
+
+Per project decision, MCP tools follow CRUDLS:
+
+| MCP tool | Maps to REST |
+|---|---|
+| `<resource>.create` | `POST /v1/admin/<resource>` |
+| `<resource>.read` | `GET /v1/admin/<resource>/{id}` |
+| `<resource>.update` | `PATCH /v1/admin/<resource>/{id}` |
+| `<resource>.delete` | `DELETE /v1/admin/<resource>/{id}` |
+| `<resource>.list` | `GET /v1/admin/<resource>` |
+| `<resource>.search` | `POST /v1/admin/<resource>/search` |
+
+Note: `read` (not `get`) is the convention. Some MCP ecosystems use `get_x`; insdi uses `<resource>.read` to make CRUDLS read clearly.
+
+Actions are tools named `<resource>.<verb>` where the verb is the action:
+
+| MCP tool | Maps to REST |
+|---|---|
+| `templates.publish` | `POST /v1/admin/templates/{id}/publish` |
+| `flow_runs.advance` | `POST /v1/admin/flow-runs/{id}/advance` |
+| `tests.run` | `POST /v1/admin/tests/{id}/run` |
+
+### URL → MCP namespace translation
+
+The one consistent translation rule: **kebab-case URL resource → snake_case MCP namespace**.
+
+| URL resource | MCP namespace |
+|---|---|
+| `templates` | `templates` |
+| `flow-runs` | `flow_runs` |
+| `agent-grants` | `agent_grants` |
+| `verified-domains` | `verified_domains` |
+| `workspace-memberships` | `workspace_memberships` |
+
+This is because MCP tool names must be identifier-safe (no hyphens) per MCP convention.
+
+### Tool input/output schemas
+
+Tool input schemas are generated from the same Pydantic models used by REST. For example, the `templates.create` tool's `inputSchema` is generated from `TemplateCreateInput`:
+
+```python
+# schemas/templates.py
+class TemplateCreateInput(BaseModel):
+    workspace_id: UUID
+    name: str
+    description: str | None = None
+    schema: dict
+    auth_required_floor: AuthFloor | None = None
+    submitter_allowlist: SubmitterAllowlist | None = None
+
+# api/v1/admin/templates.py — REST
+@router.post("/templates", status_code=201)
+def create_template_route(
+    input: TemplateCreateInput,
+    ctx: UserContext = Depends(RequireAdmin),
+) -> TemplateResponse:
+    return services.templates.create_template(ctx, input)
+
+# mcp/tools/templates.py — MCP
+@mcp_tool(
+    name="templates.create",
+    description="Create a new Template in the specified Workspace. The Template's "
+                "effective_auth_floor and effective_allowlist are computed by walking "
+                "the policy chain (Org → Workspace → Template).",
+)
+def create_template_tool(
+    input: TemplateCreateInput,
+    ctx: UserContext,
+) -> TemplateResponse:
+    return services.templates.create_template(ctx, input)
+```
+
+Tool descriptions are part of the contract (§8.4 §9.7): they document insdi-specific guidance, security defaults, and any deviations from REST conventions. Tool descriptions ship from the codebase, not from a CMS — they're version-controlled.
+
+### Listing tools — pagination
+
+MCP `.list` and `.search` tools accept `cursor` and `limit` as input parameters, and return the same `{ items, page }` envelope as REST listing endpoints. The cursor is the same opaque base64 string used by REST — the same `pagination.encode_cursor`/`decode_cursor` helpers serve both surfaces.
+
+```python
+class ListTemplatesInput(BaseModel):
+    cursor: str | None = None
+    limit: int = 50
+    workspace_id: UUID | None = None
+    # plus operator-suffix-style filters when needed
+```
+
+### Error mapping
+
+MCP returns errors as a content block with `isError: true`, containing the same RFC 9457 problem+json body REST uses:
+
+```json
+{
+  "isError": true,
+  "content": [
+    {
+      "type": "text",
+      "text": "{\"type\":\"https://docs.insdi.com/errors/policy.auth_floor_conflict\",\"title\":\"Auth-floor policy conflict\",\"status\":422,\"detail\":\"...\",\"instance\":\"templates.create\",\"code\":\"policy.auth_floor_conflict\",\"request_id\":\"req_01HXX...\"}"
+    }
+  ]
+}
+```
+
+The `instance` field for MCP errors uses the tool name (e.g. `templates.create`) instead of a URL path.
+
+The `errors.problem_response` helper produces one shape; the surface adapters wrap it differently (REST returns it as `application/problem+json` HTTP body; MCP wraps it in the `isError: true` content block).
+
+### Authentication (M1)
+
+In M1, MCP sessions authenticate via an environment variable when the server starts:
+
+```bash
+INSDI_DEBUG_PRINCIPAL_ID=au_dev_1 uvicorn <service_name>.main:app --reload
+```
+
+Every MCP tool call uses this principal ID for `UserContext` construction. This is the MCP-side equivalent of the REST `X-Debug-Principal-Id` header. Removed in M2 when real OAuth-at-session-start lands.
+
+### Local testing — MCP Inspector
+
+Every service in M1 must be testable with MCP Inspector:
+
+```bash
+# Terminal 1: start the service with debug principal
+INSDI_DEBUG_PRINCIPAL_ID=au_dev_1 uvicorn <service_name>.main:app --reload
+
+# Terminal 2: launch MCP Inspector against the running service
+npx @modelcontextprotocol/inspector http://localhost:8000/mcp
+```
+
+Inspector connects via streamable HTTP, enumerates tools, and provides an interactive UI for tool calls. M1 acceptance criteria for every service include "exercise every tool via MCP Inspector" alongside "exercise every REST route via curl."
+
+### MCP-specific concerns deferred to M4+
+
+These are §8.4 §9 features that don't apply per-tool — they're the equivalent of "the OpenAPI assembly pipeline" for REST. Not in scope M1–M3:
+
+- Split into per-audience servers (`mcp.insdi.com/{admin,home,public}`) per §8.4 §9.1
+- OAuth at MCP session start per §8.4 §8.1
+- `/.well-known/mcp` discovery per §8.4 §10
+- MCP session state in DynamoDB per §8.4 §9.9
+- Build-time manifest assembly per §8.4 §11.7
+- Prompts (curated workflow prompts) per §8.4 §9.8
+- Resources (docs, policy summaries, catalogues) per §8.4 §9.6
+
+In M1–M3, each service Lambda exposes its tools at `/mcp` on its own API; MCP Inspector connects directly. M4+ introduces the production multi-audience routing.
 
 ---
 
@@ -408,6 +578,7 @@ Per §8.2 §8.5. Always-present fields on every log line: `ts`, `level`, `servic
 
 ## What NOT to do — common temptations
 
+### REST surface
 - Don't add a `data: {...}` wrapper around single-resource responses
 - Don't return `403` for "exists but not yours" — return 404
 - Don't add a `total` count to listing responses (and don't add a `/count` endpoint)
@@ -418,3 +589,16 @@ Per §8.2 §8.5. Always-present fields on every log line: `ts`, `level`, `servic
 - Don't write to another service's owned tables (read via direct SQL OK per §8.2 §1.4; write via API or events)
 - Don't add Cognito or auth code to M1 — it goes in M2
 - Don't add audit emission to M2 — it goes in M3
+
+### MCP surface
+- Don't ship a REST route without its matching MCP tool in the same PR — parity violation
+- Don't use `get` in tool names — use `read` per CRUDLS (`templates.read`, not `templates.get`)
+- Don't use `verb_noun` MCP-community style — use `noun.verb` (`templates.create`, not `create_template`)
+- Don't use hyphens in MCP tool names — use snake_case (`flow_runs.advance`, not `flow-runs.advance`); the REST path stays kebab-case
+- Don't reimplement business logic inside an MCP tool — call the use-case function in `services/` that the REST handler calls
+- Don't define a separate input schema for the MCP tool — reuse the Pydantic model from `schemas/` that the REST handler uses
+- Don't return a different error shape from MCP than from REST — the same `errors.problem_response` helper produces both; MCP just wraps in `isError: true` content
+- Don't ship a tool description that doesn't note insdi-specific deviations from MCP convention (the `noun.verb` order, `read` vs `get`, etc.) — agents reading tool docs need this context
+- Don't add `prompts` or `resources` (MCP primitive types) in M1–M3 — they're M5+ content concerns
+- Don't add OAuth-at-session-start to MCP in M1–M3 — M1 uses the `INSDI_DEBUG_PRINCIPAL_ID` env var, M2 will use real OAuth in M4+
+

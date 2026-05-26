@@ -53,30 +53,47 @@ In v1 scope: Template/Link/Submission CRUD over REST. The Gather Template policy
 
 ## 3. Milestone roadmap
 
-### M1 — Bare CRUD, no auth, conventions-correct
+### M1 — Bare CRUDLS, no auth, conventions-correct, MCP parity
 
-**Goal:** A FastAPI Lambda where a human can create a Template, configure a Link to it, simulate a submission session against the Link, and finalise. All under correct §8.4 conventions. No authentication.
+**Goal:** A FastAPI Lambda where a human can create a Template (via curl or MCP Inspector), configure a Link, simulate a submission session against the Link, and finalise. All under correct §8.4 conventions on **both** REST and MCP surfaces. No authentication.
 
-A human can:
+A human can, on both surfaces:
 - Create a Template (with a basic JSON schema describing fields)
 - Create a Link pointing at the Template
 - Start a submission session against the Link
 - Write field-changes during the session
 - Finalise the session — turning it into a Submission row
-- List/search Templates, Links, Submissions
+- List/search/read Templates, Links, Submissions
 
 **Phases (sketch — confirm in `/gsd-discuss-phase 1`):**
 
-- **P1 — Scaffold:** Same shape as platform-service P1 — repo layout, SAM, FastAPI, Postgres locally, Alembic, structured logger, error envelope, pagination, filter parser, `_commons_pending/` convention. Also: **local DynamoDB** (DynamoDB Local in Docker or moto), since Gather uses DDB for in-flight state from M1.
-- **P2 — Cross-service ORMs (read-only):** Define the SQLAlchemy ORMs Gather needs to *read* from Platform-owned tables: `Organisation`, `Workspace`. Add to `_commons_pending/models/` (ask the user — these ORMs really belong in commons, see protocol doc). No migrations for these — Gather doesn't own them, doesn't migrate them. In a real shared-schema deployment, Platform owns the migrations. **For M1 development, run platform-service's migrations first to set up the schema, then Gather can read the tables.**
-- **P3 — Template CRUD (basic):** Three-schema Pydantic. Template ORM with `template_id`, `workspace_id`, `name`, `description`, `version`, `schema` (JSONB — the field definitions), `auth_required_floor`, `submitter_allowlist`, `created_at`, `updated_at`. **No versioning logic in M1** — just store a version number, default 1. M5+ adds publish-creates-new-version behaviour. Routes: `POST /v1/admin/templates`, `GET /v1/admin/templates`, `POST /v1/admin/templates/search`, `GET /v1/admin/templates/{tpl_id}`, `PATCH /v1/admin/templates/{tpl_id}`, `DELETE /v1/admin/templates/{tpl_id}`.
-- **P4 — The policy chain:** Implement `resolve_effective_policy(template_id)` that walks `Template → Workspace → Organisation` and computes `effective_auth_floor` and `effective_allowlist` per §8.6 §4. This is a use-case function (in `services/`). Used by the Template GET/PATCH responses to populate the computed fields. **Implement the inheritance rules correctly from day one** — nearest-ancestor-wins, tighten-only-downward, explicit refusal on widen attempts. This pattern repeats for Link in P5; getting it solid here saves rework.
-- **P5 — Link CRUD:** Link ORM with `link_id`, `template_id`, `short_id` (URL-friendly), `auth_required_floor`, `submitter_allowlist`, plus the effective fields computed by walking `Link → Template → Workspace → Organisation`. Routes: `POST /v1/admin/links`, `GET /v1/admin/links`, `POST /v1/admin/links/search`, `GET /v1/admin/links/{link_id}`, `PATCH /v1/admin/links/{link_id}`, `DELETE /v1/admin/links/{link_id}`. Validate at create/update time that the Link's declared policy does not widen its parent — reject with `422 policy.allowlist_widens_inherited` or `422 policy.auth_floor_conflict`.
-- **P6 — Submission session start:** `POST /v1/public/submission-sessions` accepts a Link short_id, walks the policy chain, generates a session UUID, writes the session metadata to DDB (one item: `PK = SESSION#{id}`, `SK = META`). Returns the session context to the client. In M1 this works without any auth on the public side — the session ID + session cookie semantics from §8.2 §4.2 are simulated; an `X-Debug-Submission-Session-Id` header (analogous to `X-Debug-Principal-Id`) carries the session for subsequent calls.
-- **P7 — Field changes:** `POST /v1/public/submission-sessions/{id}/field-changes` writes one `EVENT#{event_id}` item and updates `STATE#CURRENT` in DDB. Per §8.3, one `TransactWriteItems` per change. **Simplify in M1:** skip the TransactWriteItems pattern; just do two separate writes for now (note this as a known limitation). M3 or M4 corrects to atomic.
-- **P8 — Finalise:** `POST /v1/public/submission-sessions/{id}/finalise` reads `STATE#CURRENT`, validates against the Template's schema, inserts canonical row into PG `submissions`, marks DDB `META` as `submitted`. Returns the finalised Submission. **No EventBridge publication in M1** — `submission.finalised` event is added later.
-- **P9 — Submission CRUD (admin-side):** `GET /v1/admin/submissions`, `POST /v1/admin/submissions/search`, `GET /v1/admin/submissions/{sub_id}`. DELETE deliberately deferred — submissions don't get hard-deleted; erasure flow comes later.
-- **P10 — Polish:** Manual test script that exercises the full lifecycle (create Template → create Link → start session → field changes → finalise → read submission). OpenAPI sanity check.
+Each entity-phase delivers REST routes AND matching MCP tools in the same PR per the principles doc §3.
+
+- **P1 — Scaffold:** Same shape as platform-service P1 — repo layout (including `mcp/` directory), SAM, FastAPI with MCP server mounted at `/mcp`, Postgres locally, Alembic, structured logger, error envelope, pagination, filter parser, `_commons_pending/` convention. Also: **local DynamoDB** (DynamoDB Local in Docker or moto), since Gather uses DDB for in-flight state from M1. Smoke-test: MCP Inspector connects and lists 0 tools.
+
+- **P2 — Cross-service ORMs (read-only):** Define the SQLAlchemy ORMs Gather needs to *read* from Platform-owned tables: `Organisation`, `Workspace`. Add to `_commons_pending/models/` (ask the user). No migrations for these — Gather doesn't own them. For M1 development, run platform-service's migrations first to set up the schema, then Gather can read the tables. No MCP tools in this phase (read-only access to other services' tables doesn't expose tools — Gather's MCP tools always go through Gather's own use-case functions, which use these ORMs internally).
+
+- **P3 — Template CRUDLS:**
+  - Three-schema Pydantic. Template ORM with `template_id`, `workspace_id`, `name`, `description`, `version`, `schema` (JSONB), `auth_required_floor`, `submitter_allowlist`, `created_at`, `updated_at`. **No versioning logic in M1** — `version` defaults to 1.
+  - Use-case functions in `services/templates.py`: `create_template`, `read_template`, `update_template`, `delete_template`, `list_templates`, `search_templates`.
+  - REST routes: `POST /v1/admin/templates`, `GET`, `GET /{tpl_id}`, `PATCH /{tpl_id}`, `DELETE /{tpl_id}`, `POST /search`.
+  - MCP tools: `templates.{create, read, update, delete, list, search}`.
+  - Tool descriptions note: "Response includes computed `effective_auth_floor` and `effective_allowlist` resolved by walking the policy chain — these may differ from the declared fields."
+
+- **P4 — The policy chain:** Implement `resolve_effective_policy(template_id)` that walks `Template → Workspace → Organisation` and computes `effective_auth_floor` and `effective_allowlist` per §8.6 §4. Use-case function in `services/policy.py`. Used by the Template GET/PATCH responses to populate computed fields — applies to both REST and MCP responses identically since both call the same `services.templates.read_template` which calls `services.policy.resolve_effective_policy`. **Implement the inheritance rules correctly from day one** — nearest-ancestor-wins, tighten-only-downward, explicit refusal on widen attempts. This pattern repeats for Link in P5.
+
+- **P5 — Link CRUDLS:** Link ORM, three-schema, use-case functions. REST routes: `POST /v1/admin/links`, `GET`, `GET /{link_id}`, `PATCH /{link_id}`, `DELETE /{link_id}`, `POST /search`. MCP tools: `links.{create, read, update, delete, list, search}`. Policy-chain walk extends to four levels (`Link → Template → Workspace → Organisation`). Reject widening at create/update time with `422 policy.allowlist_widens_inherited` or `422 policy.auth_floor_conflict` — same error on both surfaces.
+
+- **P6 — Submission session start:** REST: `POST /v1/public/submission-sessions` accepts a Link short_id, walks the policy chain, generates a session UUID, writes session metadata to DDB. Returns session context. M1 simulation uses `X-Debug-Submission-Session-Id` header for subsequent calls.
+  - MCP: `submission_sessions.start` tool — takes the same input, returns the same response. **Note:** the `/v1/public/*` URL namespace corresponds to "submission-session-authenticated" tools, which in M1's single `/mcp` endpoint are exposed alongside admin tools. M4 separates them via the `mcp.insdi.com/public` audience server.
+
+- **P7 — Field changes:** REST: `POST /v1/public/submission-sessions/{id}/field-changes` writes one `EVENT#{event_id}` and updates `STATE#CURRENT` in DDB. MCP: `submission_sessions.add_field_changes` tool (or `submission_sessions.update_state` — confirm naming during discuss). **M1 simplification:** skip `TransactWriteItems`, do two separate writes. M3 corrects to atomic.
+
+- **P8 — Finalise:** REST: `POST /v1/public/submission-sessions/{id}/finalise` reads `STATE#CURRENT`, validates against Template schema, inserts canonical row into PG `submissions`, marks DDB `META` as `submitted`. MCP: `submission_sessions.finalise` tool. **No EventBridge publication in M1** — `submission.finalised` event added in M5+.
+
+- **P9 — Submission CRUDL (admin-side):** Reads only. REST: `GET /v1/admin/submissions`, `POST /v1/admin/submissions/search`, `GET /v1/admin/submissions/{sub_id}`. MCP: `submissions.{read, list, search}`. **No create/update/delete on admin-side Submission tools** — Submissions are only created via the public submission-session finalise path; they're not hard-deleted (erasure is M5+).
+
+- **P10 — Polish:** Manual test script that exercises the full lifecycle end-to-end on both surfaces (curl script for REST, Inspector session export for MCP). OpenAPI sanity check; MCP `tools/list` sanity check.
 
 **Decisions to grill in `/gsd-discuss-phase 1`:**
 - The Template `schema` field shape — JSON Schema? a custom shape? what field types are supported in M1 (text, number, date, choice — what about file, multi-choice, signature)?
@@ -86,6 +103,8 @@ A human can:
 - DDB table shape for sessions — confirm `PK = SESSION#{id}`, `SK = META | STATE#CURRENT | EVENT#{event_id}` aligns with §8.3
 - Whether the policy chain refusal returns 422 with a structured `errors` array showing which level set what (recommended) or just a single error
 - The Workspaces/Memberships read pattern — since Gather doesn't own them, the M1 SQL reads happen against tables created by Platform's M1 migrations. If platform-service M1 is not yet shipped, decide whether to stub the Workspace table here in Gather to unblock M1 work (and migrate to Platform-owned later) or pause Gather M1 until Platform M1 P3 is done
+- MCP library — should match what Platform chose; pick once, use everywhere
+- MCP tool naming for actions on sessions: `submission_sessions.finalise` vs `submission_sessions.finalize` vs `submission_sessions.submit` — confirm
 
 **Out of scope for M1:**
 - JWT validation, real auth (M2)
@@ -93,11 +112,12 @@ A human can:
 - Idempotency, ETag, rate-limit (M2)
 - EventBridge publication of `submission.finalised` and others (M5+)
 - File attachments (M5+ once Resources exists)
-- Template versioning / publish flow (M5+)
+- Template versioning / publish flow (M5+) — adds `templates.publish` MCP tool when it lands
 - Trigger evaluation (Resources-owned; out of scope here)
 - Link-scoped JWT issuance for verified-identity submissions (M5+ in Platform)
 - Verify Flow integration (M5+)
 - Calculate Workbook integration (M5+)
+- MCP-specific production concerns (per-audience server split, OAuth, discovery) — M4
 
 ---
 
@@ -154,7 +174,7 @@ Suggested order:
 - **File attachments:** Requires Resources to exist. Out of scope until Resources Lambda is built.
 - **Allowlist-tag mechanism:** The `tag:vendor` allowlist resolution per the auth doc §7.1 — "submitters whose previous Submissions to this Org carry the vendor tag." Requires the Submission table to support tags.
 - **Re-contact flow:** Per the auth doc §7.1 — every interaction is a Submission, even follow-up. Verify-flow integration creates new Links scoped to a single follow-up.
-- **MCP surface:** Co-located with REST per §8.4 §9.3. Tools: `templates.create`, `templates.publish`, `submissions.search`, etc. Naming `noun.verb` matching REST.
+- **MCP enhancements (M5+ adds new tools as features land):** Each M5+ feature ships its REST routes and matching MCP tools together. So `templates.publish`, `links.regenerate_short_id`, `submissions.add_tag`, etc. are added in the same phase as their REST counterparts. The MCP surface itself isn't a separate workstream — it grows alongside REST.
 - **Erasure participation:** Subscribe to `enduser.erasure-requested`, anonymise identity fields on Submissions, retain bodies per regulatory obligation, emit `enduser.erasure-completed` per the auth doc §7.4.
 - **Tag-and-search-by-tag for submissions.**
 - **Submission body validation hardening:** Schema validation that produces structured `errors` arrays per §8.4 §5.3 multi-error response shape.
@@ -197,18 +217,38 @@ GET    /v1/home/submissions/{sub_id}                    # only if caller is the 
 
 ```
 POST   /v1/admin/templates/{tpl_id}/publish              # action — creates new version
-
-# MCP tools (when MCP lands):
-# templates.create, templates.get, templates.update, templates.publish
-# links.create, links.get, links.update
-# submissions.search, submissions.get
 ```
+
+### MCP tool surface (M1)
+
+Mirrors the REST surface above. Single MCP endpoint at `/mcp` on the service Lambda. CRUDLS naming, snake_case namespaces:
+
+```
+templates.{create, read, update, delete, list, search}
+links.{create, read, update, delete, list, search}
+submissions.{read, list, search}                          # no create/update/delete from admin
+submission_sessions.start                                  # corresponds to POST /v1/public/submission-sessions
+submission_sessions.add_field_changes                     # confirm naming
+submission_sessions.finalise
+submission_sessions.read                                   # session state read
+```
+
+### MCP tool surface (M5+)
+
+Adds tools as features land:
+
+```
+templates.publish                                          # when versioning lands
+submissions.add_tag, submissions.remove_tag               # when tagging lands
+```
+
+In M4, all of the above split into per-audience MCP servers per §8.4 §9.1: admin tools go to `mcp.insdi.com/admin`, submission-session tools go to `mcp.insdi.com/public`, end-user-self-service tools go to `mcp.insdi.com/home`.
 
 ### Naming discipline
 
 - `templates` not `gather-templates` — domain vocabulary per §8.4 §1.3
-- `submission-sessions` kebab-case
-- `field-changes` kebab-case
+- `submission-sessions` kebab-case in URL; `submission_sessions` snake_case as MCP namespace
+- `field-changes` kebab-case in URL; `add_field_changes` snake_case as MCP tool name
 - ID prefixes: `tpl_`, `link_`, `sub_`, `subsess_` (or whatever convention — confirm during discuss)
 
 ### Computed-field discipline
@@ -278,7 +318,9 @@ The ORM definitions for these read-only entities live in `_commons_pending/model
 
 ## 6. M1 acceptance criteria
 
-When M1 is done, a human can run this script end-to-end with curl:
+When M1 is done, **both surfaces work end-to-end**.
+
+### REST (curl) — full lifecycle
 
 ```bash
 # Setup (presumes Platform M1 has been run, OR Gather has created a Workspace stub locally)
@@ -322,12 +364,31 @@ curl http://localhost:8000/v1/admin/submissions \
 
 Plus the §8.4 conventions are visible in the responses: cursor pagination, `_deprecation` absent (v1 not deprecated), error envelopes RFC 9457, computed effective fields on Template and Link responses, no `total` count anywhere.
 
+### MCP (Inspector) — same full lifecycle
+
+With the service running under `INSDI_DEBUG_PRINCIPAL_ID=au_dev_1`, connect MCP Inspector to `http://localhost:8000/mcp` and:
+
+1. `tools/list` enumerates: `templates.{create,read,update,delete,list,search}`, `links.{create,read,update,delete,list,search}`, `submissions.{read,list,search}`, `submission_sessions.{start, add_field_changes, finalise, read}`
+2. Call `templates.create` with the same input as the curl script above → returns Template response with `effective_auth_floor` and `effective_allowlist` populated
+3. Call `links.create` → returns Link response
+4. Call `submission_sessions.start` with the link short_id → returns SubmissionSession response
+5. Call `submission_sessions.add_field_changes` with the same `changes` payload → returns updated state
+6. Call `submission_sessions.finalise` → returns Submission response
+7. Call `submissions.list` → returns the new Submission in the items
+8. Errors render correctly: try `templates.create` with bad input → returns `isError: true` with a `validation.multi` problem+json body
+9. Policy-chain refusal renders correctly: try to create a Link with an `allowlist` widening the Template's → returns `isError: true` with `policy.allowlist_widens_inherited`
+
+### Parity check
+
+The full lifecycle round-trips cleanly between surfaces — e.g. create a Template via REST, create a Link via MCP against it, start a submission via REST, finalise via MCP. The same data is visible regardless of which surface you query through.
+
 ---
 
 ## 7. Things to watch / known tensions
 
 - **Policy-chain walk performance:** Walking Template → Workspace → Org on every Link response is one extra join. Fine at v1 scale. If list endpoints become slow, eager-load via SQLAlchemy. Don't over-engineer in M1.
-- **DDB session state in M1:** M1 uses simplified writes (non-atomic) for field changes. **This is acceptable provided it's documented and fixed in M3.** Don't let it slip past.
-- **Template versioning is deferred to M5+.** M1 stores a `version` integer that's always 1. The data model must support versioning when it lands, so the Template ORM should already have the column (versioning behaviour comes later, but the schema accommodates it from M1).
+- **DDB session state in M1:** M1 uses simplified writes (non-atomic) for field changes. **This is acceptable provided it's documented and fixed in M3.** Don't let it slip past. Applies to both REST and MCP — the same use-case function backs both.
+- **Template versioning is deferred to M5+.** M1 stores a `version` integer that's always 1. The data model must support versioning when it lands, so the Template ORM should already have the column. When versioning lands in M5+, `templates.publish` is the MCP tool added alongside the REST publish route.
 - **File attachments don't work until Resources exists.** The Template schema may declare `file` field types, but a submission with a file attachment can only be stubbed in M1. Decide during discuss whether to allow file fields in M1 (with a placeholder) or reject them.
 - **Submission ↔ Verify / Calculate cross-service flow** is entirely M5+ work. Gather M1 finalises submissions in isolation; nothing happens downstream.
+- **MCP audience separation in M1:** The single `/mcp` endpoint serves admin tools AND public submission-session tools without distinction. This is intentional M1 simplification — M4 introduces the per-audience server split per §8.4 §9.1. Don't try to enforce audience separation manually in M1; it's noise that the M4 architecture handles cleanly.

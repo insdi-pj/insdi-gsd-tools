@@ -47,25 +47,44 @@ In v1 scope: REST API surface for designing and managing Flows. FlowRun lifecycl
 
 ## 3. Milestone roadmap
 
-### M1 — Bare CRUD, no auth, conventions-correct
+### M1 — Bare CRUDLS, no auth, conventions-correct, MCP parity
 
-**Goal:** A FastAPI Lambda where a human can define a Flow with several Steps, manually create a FlowRun against a Submission, and advance the run through its steps. All under §8.4 conventions. No authentication.
+**Goal:** A FastAPI Lambda where a human can define a Flow with several Steps, manually create a FlowRun against a Submission, and advance the run through its steps — on **both** REST and MCP surfaces. All under §8.4 conventions. No authentication.
 
 **Phases (sketch — confirm in `/gsd-discuss-phase 1`):**
 
-- **P1 — Scaffold:** Same template as Platform and Gather P1. The decisions on `_commons_pending/`, error envelope, pagination should follow whichever service goes first (Platform — if its conventions are settled, copy them).
-- **P2 — Cross-service ORMs (read-only):** Define Gather's Submission ORM and Platform's Organisation/Workspace ORMs for reading. `_commons_pending/models/` — ask the user.
-- **P3 — Flow CRUD:** Flow ORM with `flow_id`, `workspace_id`, `name`, `description`, `version` (always 1 in M1), `definition` (JSONB — the step graph), `created_at`, `updated_at`. Three-schema Pydantic. Routes: `POST /v1/admin/flows`, `GET /v1/admin/flows`, `POST /v1/admin/flows/search`, `GET /v1/admin/flows/{flow_id}`, `PATCH /v1/admin/flows/{flow_id}`, `DELETE /v1/admin/flows/{flow_id}`.
-- **P4 — FlowStep CRUD:** Two design options to grill during discuss:
-  - **Option A:** FlowSteps are embedded in the Flow's `definition` JSONB — no separate routes; you edit a Flow's steps by PATCHing the Flow
-  - **Option B:** FlowSteps are first-class entities with their own routes (`POST /v1/admin/flows/{flow_id}/steps`, etc.)
-  
-  Option A is simpler and matches how most workflow tools represent step graphs. Option B is more API-surface-heavy but allows finer-grained access control later. **Recommend A for M1**, with option B reconsidered in M5+ if needed.
+Each entity-phase delivers REST routes AND matching MCP tools in the same PR per principles doc §3.
 
-- **P5 — FlowRun creation:** `POST /v1/admin/flow-runs` accepts `{ flow_id, submission_id }`, creates a FlowRun row with `status=running`, `current_step_id=<first_step>`, `started_at`. **In M1 no actual step execution happens** — the FlowRun just exists in a state machine.
-- **P6 — FlowRun advancement:** `POST /v1/admin/flow-runs/{run_id}/advance` — an admin manually advances the FlowRun to the next step. Updates `current_step_id`. If at the end, sets `status=completed`. This is a placeholder for real automated execution (M5+) but is enough to demonstrate the state machine works.
-- **P7 — FlowRun listing/search:** `GET /v1/admin/flow-runs`, `POST /v1/admin/flow-runs/search`, `GET /v1/admin/flow-runs/{run_id}`. Filterable by `flow_id`, `submission_id`, `status`, `started_at`.
-- **P8 — Polish.**
+- **P1 — Scaffold:** Same template as Platform and Gather P1, including `mcp/` directory and MCP server mounted at `/mcp` via streamable HTTP. Follow the conventions and library choices already locked by Platform M1 P1 — copy, don't reinvent. Smoke-test: MCP Inspector connects and lists 0 tools.
+
+- **P2 — Cross-service ORMs (read-only):** Define Gather's Submission ORM and Platform's Organisation/Workspace ORMs for reading. `_commons_pending/models/` — ask the user. No tools.
+
+- **P3 — Flow CRUDLS:**
+  - Three-schema Pydantic. Flow ORM with `flow_id`, `workspace_id`, `name`, `description`, `version` (always 1 in M1), `definition` (JSONB — step graph), `created_at`, `updated_at`.
+  - Use-case functions in `services/flows.py`: `create_flow`, `read_flow`, `update_flow`, `delete_flow`, `list_flows`, `search_flows`.
+  - REST routes: `POST /v1/admin/flows`, `GET`, `GET /{id}`, `PATCH /{id}`, `DELETE /{id}`, `POST /search`.
+  - MCP tools: `flows.{create, read, update, delete, list, search}`.
+
+- **P4 — FlowStep CRUD:** Two design options to grill during discuss:
+  - **Option A:** FlowSteps are embedded in the Flow's `definition` JSONB — no separate routes or tools; you edit a Flow's steps by PATCHing the Flow / calling `flows.update`
+  - **Option B:** FlowSteps are first-class entities with their own routes and MCP tools (`flow_steps.{create, read, update, delete, list}`)
+  
+  Option A is simpler — no FlowStep tool surface to maintain. Option B has finer-grained surface. **Recommend A for M1**, reconsider B in M5+ if needed.
+
+- **P5 — FlowRun creation:** 
+  - REST: `POST /v1/admin/flow-runs` accepts `{ flow_id, submission_id }`, creates a FlowRun row with `status=running`, `current_step_id=<first_step>`, `started_at`.
+  - MCP: `flow_runs.create` tool with same input/output. **In M1 no actual step execution happens** — the FlowRun just exists in a state machine.
+
+- **P6 — FlowRun advancement:**
+  - REST: `POST /v1/admin/flow-runs/{run_id}/advance` — manually advance to the next step. Updates `current_step_id`. Sets `status=completed` if at the end.
+  - MCP: `flow_runs.advance` tool.
+  - Tool description: "Manually advance the FlowRun to the next step. In M1 this is the only execution mechanism; M5+ adds automated step execution via background workers and event triggers."
+
+- **P7 — FlowRun listing/search/read:**
+  - REST: `GET /v1/admin/flow-runs`, `POST /v1/admin/flow-runs/search`, `GET /v1/admin/flow-runs/{run_id}`.
+  - MCP: `flow_runs.{list, search, read}`. (Note: `read` not `get`.)
+
+- **P8 — Polish:** Manual test script for REST (curl) and MCP (Inspector session). OpenAPI + `tools/list` sanity checks.
 
 **Decisions to grill in `/gsd-discuss-phase 1`:**
 - Embedded vs first-class FlowSteps (Option A vs B above)
@@ -74,6 +93,7 @@ In v1 scope: REST API surface for designing and managing Flows. FlowRun lifecycl
 - FlowRun `status` enum — `running`, `completed`, `failed`, `cancelled`? Add `awaiting_input` and `paused`?
 - Whether `current_step_id` is a denormalised field or computed from FlowRun's event history (M1 should denormalise — simpler)
 - ID prefixes: `flow_`, `flowstep_` (if first-class), `run_`
+- MCP tool naming for `flow_runs.advance` — confirm; or `flow_runs.next_step`?
 
 **Out of scope for M1:**
 - JWT validation, auth (M2)
@@ -86,6 +106,7 @@ In v1 scope: REST API surface for designing and managing Flows. FlowRun lifecycl
 - Integration calls to external systems — M5+
 - Bound CalculateRun integration — M5+
 - Conditional branching in Flow definitions — M5+
+- MCP-specific production concerns (per-audience server split, OAuth, discovery) — M4
 
 ---
 
@@ -130,7 +151,7 @@ Same shape as Platform and Gather M4.
 - **Step types — Gather follow-up:** A step that publishes `verify.link-requested`; Gather mints a Link and emails the original submitter. The follow-up Submission flows back as input to a subsequent step.
 - **Conditional branching:** Step transitions depend on data values, comparison results, calculate output, etc.
 - **Manual-review steps:** A step that pauses the run until an AdminUser approves/rejects.
-- **MCP surface.**
+- **MCP enhancements (M5+ adds new tools as features land):** Each M5+ feature ships its REST routes and matching MCP tools together. `flows.publish` (when versioning lands), event-driven `flow_runs.create` would be triggered externally (no MCP tool — it's an event handler), etc.
 
 ---
 
@@ -170,18 +191,41 @@ POST   /v1/admin/flows/{flow_id}/publish         # action
 
 EventBridge consumers don't appear in the URL surface — they hook in via the Lambda's event-source configuration, separate from API Gateway routes.
 
+### MCP tool surface (M1)
+
+Single `/mcp` endpoint, CRUDLS naming, snake_case namespaces:
+
+```
+flows.{create, read, update, delete, list, search}
+flow_runs.{create, read, update, delete, list, search}
+flow_runs.advance                                 # action — manual advance
+flow_runs.cancel                                  # action — manual cancel
+```
+
+Note `update`/`delete` on `flow_runs` may have limited semantics — FlowRuns are append-only state machines in M1; confirm during discuss whether they're omitted entirely or stubbed to error with `policy.invalid_state_transition`.
+
+### MCP tool surface (M5+)
+
+```
+flows.publish                                     # when versioning lands
+```
+
+In M4, all of the above split into per-audience MCP servers per §8.4 §9.1.
+
 ### Naming discipline
 
 - `flows` not `verify-flows` (domain vocabulary)
-- `flow-runs` kebab-case
-- `flow-steps` kebab-case (if first-class)
+- `flow-runs` kebab-case in URLs; `flow_runs` snake_case as MCP namespace
+- `flow-steps` kebab-case in URLs; `flow_steps` snake_case as MCP namespace (if first-class)
 - ID prefixes: `flow_`, `run_`, `flowstep_` (or whatever's decided)
 
 ---
 
 ## 5. M1 acceptance criteria
 
-A human can run this script:
+When M1 is done, **both surfaces work**.
+
+### REST (curl) — full lifecycle
 
 ```bash
 # Setup — needs a Submission from Gather M1, OR a stub
@@ -224,13 +268,30 @@ curl http://localhost:8001/v1/admin/flow-runs/$RUN \
     | jq .status   # → "completed"
 ```
 
-Plus all §8.4 conventions visible in the responses.
+### MCP (Inspector) — full lifecycle
+
+With `INSDI_DEBUG_PRINCIPAL_ID=au_dev_1`, connect MCP Inspector to `http://localhost:8001/mcp`:
+
+1. `tools/list` enumerates `flows.{create,read,update,delete,list,search}`, `flow_runs.{create,read,list,search,advance,cancel}`
+2. `flows.create` with the same `definition` payload → returns Flow response
+3. `flow_runs.create` with `{ flow_id, submission_id }` → returns FlowRun with `status="running"`, `current_step_id="step1"`
+4. `flow_runs.advance` with `{ id: run_id }` → returns FlowRun with `current_step_id="step2"`
+5. `flow_runs.advance` again → returns FlowRun with `status="completed"`
+6. `flow_runs.read` → returns the completed FlowRun
+7. Error cases render correctly on both surfaces (e.g. advancing a completed run → `409 conflict.invalid_state_transition`)
+
+### Parity check
+
+Operations round-trip cleanly across surfaces (create Flow via REST, advance FlowRun via MCP, etc.).
+
+Plus all §8.4 conventions visible in the responses on both surfaces.
 
 ---
 
 ## 6. Things to watch
 
 - **Cross-service Submission reference:** A FlowRun's `submission_id` points at a Gather-owned row. In M1 you can stub a row in the local PG (no foreign-key enforcement across "services" — they share `public` schema), but the cross-service-read pattern (Verify reads Submission via SQL) is real from M5+ onwards.
-- **No execution engine in M1.** The `advance` endpoint exists as a manual placeholder. Resist the temptation to add even a tiny rules engine — that's M5+ work.
+- **No execution engine in M1.** The `advance` endpoint / `flow_runs.advance` tool exists as a manual placeholder. Resist the temptation to add even a tiny rules engine — that's M5+ work. Applies to both surfaces equally.
 - **Flow definition JSON schema** — the shape of `definition` will evolve over many milestones as new step types appear. M1 should accept a permissive schema (a `steps` array) and let M5+ refine it.
-- **EventBridge wiring** (consuming `submission.finalised`) is the substantive M5+ work. Until then Verify lives in isolation — humans manually create FlowRuns from the admin API.
+- **EventBridge wiring** (consuming `submission.finalised`) is the substantive M5+ work. Until then Verify lives in isolation — humans manually create FlowRuns via REST or MCP.
+- **Update/Delete semantics on FlowRuns:** A FlowRun isn't really updated through normal CRUD — its state changes through `advance` and `cancel`. M1 can either (a) omit `flow_runs.update`/`flow_runs.delete` from the MCP tool surface entirely, or (b) include them and have them error with `policy.invalid_state_transition`. Confirm during discuss.

@@ -47,28 +47,55 @@ Calculate is conceptually the simplest of the three service-family Lambdas in M1
 
 ## 3. Milestone roadmap
 
-### M1 — Bare CRUD, no auth, conventions-correct
+### M1 — Bare CRUDLS, no auth, conventions-correct, MCP parity
 
-**Goal:** A FastAPI Lambda where a human can define a trivial Workbook (a simple formula like "score = field_a * 2 + field_b"), create a Set of test cases, define Tests, and trigger a CalculateRun against a Submission to get a result. All under §8.4 conventions, no authentication.
+**Goal:** A FastAPI Lambda where a human can define a trivial Workbook (a simple formula like "score = field_a * 2 + field_b"), create a Set of test cases, define Tests, and trigger a CalculateRun against a Submission to get a result — on **both** REST and MCP surfaces. All under §8.4 conventions, no authentication.
 
 **Phases (sketch — confirm in `/gsd-discuss-phase 1`):**
 
-- **P1 — Scaffold:** Same shape as the others. Reuse decisions from Platform's M1 P1.
-- **P2 — Cross-service ORMs (read-only):** Submission ORM (Gather-owned), Organisation/Workspace ORMs (Platform-owned). `_commons_pending/` — ask user.
-- **P3 — Workbook CRUD:** Workbook ORM with `workbook_id`, `workspace_id`, `name`, `description`, `version` (always 1 in M1), `definition` (JSONB — the computation rules), `created_at`, `updated_at`. Three-schema Pydantic. Routes: `POST /v1/admin/workbooks`, `GET /v1/admin/workbooks`, `POST /v1/admin/workbooks/search`, `GET /v1/admin/workbooks/{wb_id}`, `PATCH /v1/admin/workbooks/{wb_id}`, `DELETE /v1/admin/workbooks/{wb_id}`.
-- **P4 — Set CRUD:** Set is a named collection of input cases (think: "production sample inputs"). Routes nested under Workbook: `GET /v1/admin/workbooks/{wb_id}/sets`, `POST /v1/admin/sets`, `GET /v1/admin/sets/{set_id}`, `PATCH /v1/admin/sets/{set_id}`, `DELETE /v1/admin/sets/{set_id}`. **Confirm during discuss whether Sets nest under Workbook or are top-level with FK** — §8.4 §3.3 guidance: child enumeration nests, child with own ID flat. Recommend flat with FK + nested enumeration.
-- **P5 — Test CRUD:** Test is `{ inputs, expected_outputs }` for a specific Workbook. Similar pattern to Set.
-- **P6 — Workbook execution stub:** A `services/compute.py` that evaluates a Workbook's `definition` against an input dict. **In M1, support only the simplest possible computation model:**
+Each entity-phase delivers REST routes AND matching MCP tools in the same PR per principles doc §3.
+
+- **P1 — Scaffold:** Same shape as the others — repo layout including `mcp/` directory, SAM, FastAPI with MCP server mounted at `/mcp` via streamable HTTP, Postgres locally, Alembic, structured logger, error envelope, pagination, filter parser. Reuse decisions from Platform's M1 P1 (MCP library, conventions, `_commons_pending/` shape). Smoke-test: MCP Inspector connects and lists 0 tools.
+
+- **P2 — Cross-service ORMs (read-only):** Submission ORM (Gather-owned), Organisation/Workspace ORMs (Platform-owned). `_commons_pending/` — ask user. No tools.
+
+- **P3 — Workbook CRUDLS:**
+  - Three-schema Pydantic. Workbook ORM with `workbook_id`, `workspace_id`, `name`, `description`, `version` (always 1 in M1), `definition` (JSONB — computation rules), `created_at`, `updated_at`.
+  - Use-case functions in `services/workbooks.py`: `create_workbook`, `read_workbook`, `update_workbook`, `delete_workbook`, `list_workbooks`, `search_workbooks`.
+  - REST routes: `POST /v1/admin/workbooks`, `GET`, `GET /{id}`, `PATCH /{id}`, `DELETE /{id}`, `POST /search`.
+  - MCP tools: `workbooks.{create, read, update, delete, list, search}`.
+
+- **P4 — Set CRUDLS:** Set is a named collection of input cases.
+  - REST routes: `GET /v1/admin/workbooks/{wb_id}/sets` (nested enumeration), `POST /v1/admin/sets`, `GET /v1/admin/sets/{set_id}`, `PATCH /v1/admin/sets/{set_id}`, `DELETE /v1/admin/sets/{set_id}`.
+  - MCP tools: `sets.{create, read, update, delete, list}`. Listing accepts an optional `workbook_id` filter parameter — the URL nesting maps to a tool input parameter, not a separate tool.
+  - **Confirm during discuss whether Sets nest under Workbook or are top-level with FK** — §8.4 §3.3 guidance: child enumeration nests, child with own ID flat. Recommend flat with FK + nested REST enumeration. MCP tools are always flat with optional parent-FK filter.
+
+- **P5 — Test CRUDLS:** Test is `{ inputs, expected_outputs }` for a specific Workbook. Same pattern as Set.
+  - REST: `GET /v1/admin/workbooks/{wb_id}/tests`, `POST /v1/admin/tests`, `GET /v1/admin/tests/{test_id}`, `PATCH /v1/admin/tests/{test_id}`, `DELETE /v1/admin/tests/{test_id}`.
+  - MCP tools: `tests.{create, read, update, delete, list}`.
+
+- **P6 — Workbook execution stub:** A `services/compute.py` use-case function `evaluate_workbook(workbook_id, input)` that evaluates a Workbook's `definition` against an input dict. **In M1, support only the simplest possible computation model:**
   - A `definition` like `{ "outputs": { "score": "field_a * 2 + field_b" } }`
   - A safe expression evaluator (e.g. asteval, simpleeval — not raw `eval()` — confirm in discuss)
   - Returns `{ "outputs": { "score": 42 } }`
   - No conditional logic, no aggregation, no per-row processing
   - More complex computation is M5+
+  - This is the use-case function called by both `calculate_runs.create` (P7) and `tests.run` (P9). No tool of its own; it's internal.
 
-- **P7 — CalculateRun creation + execution:** `POST /v1/admin/calculate-runs` accepts `{ workbook_id, input }` (or `{ workbook_id, submission_id }`), reads the input, invokes the executor synchronously, persists a CalculateRun row with `status`, `outputs`, `started_at`, `completed_at`, and `error` (if any). Returns the CalculateRun. **Synchronous execution in M1** (the Lambda blocks until done). Async + run-status-polling is M5+.
-- **P8 — CalculateRun listing/search:** `GET /v1/admin/calculate-runs`, `POST /v1/admin/calculate-runs/search`, `GET /v1/admin/calculate-runs/{run_id}`. Filterable by `workbook_id`, `submission_id`, `status`.
-- **P9 — Test execution:** `POST /v1/admin/tests/{test_id}/run` — executes the Test's input against its bound Workbook, compares actual outputs to expected, returns pass/fail with diff. Tests are validation tooling.
-- **P10 — Polish.**
+- **P7 — CalculateRun creation + execution:**
+  - REST: `POST /v1/admin/calculate-runs` accepts `{ workbook_id, input }` or `{ workbook_id, submission_id }`, reads the input, invokes the executor synchronously, persists a CalculateRun row with `status`, `outputs`, `started_at`, `completed_at`, `error` (if any). Returns the CalculateRun.
+  - MCP: `calculate_runs.create` tool with the same input shape and response. **Synchronous execution in M1** (the Lambda blocks until done). Async + run-status-polling is M5+.
+
+- **P8 — CalculateRun listing/read/search:**
+  - REST: `GET /v1/admin/calculate-runs`, `POST /v1/admin/calculate-runs/search`, `GET /v1/admin/calculate-runs/{run_id}`. Filterable by `workbook_id`, `submission_id`, `status`.
+  - MCP: `calculate_runs.{read, list, search}`. **No update/delete on CalculateRun** — runs are immutable execution records.
+
+- **P9 — Test execution:**
+  - REST: `POST /v1/admin/tests/{test_id}/run` — executes the Test's input against its bound Workbook, compares actual outputs to expected, returns pass/fail with diff.
+  - MCP: `tests.run` tool taking `{ id: test_id }` and returning the same pass/fail result.
+  - Tool description: "Execute the Test against its bound Workbook and compare actual vs expected outputs. Returns `{ passed: bool, actual_outputs, expected_outputs, diff }`. Used for validating Workbook behaviour."
+
+- **P10 — Polish:** Manual test script for REST (curl) and MCP (Inspector session). OpenAPI + `tools/list` sanity checks.
 
 **Decisions to grill in `/gsd-discuss-phase 1`:**
 - Workbook `definition` shape — what's the M1 minimum? A flat `{ outputs: { name: expression } }` is small enough. Or do we want intermediate variables, conditionals, etc.?
@@ -77,6 +104,7 @@ Calculate is conceptually the simplest of the three service-family Lambdas in M1
 - Sync vs async CalculateRun in M1 — strongly recommend sync (Lambda timeout permitting). Async needs a Step Functions or worker pattern; M5+ work
 - Whether CalculateRun input is `Submission` (read via FK) or direct `input` payload, or both. Probably both — submitting a raw payload is the developer's iteration loop; submitting via `submission_id` is the production path
 - ID prefixes: `wb_`, `set_`, `test_`, `crun_` or `calc_`
+- MCP library — must match Platform's choice
 
 **Out of scope for M1:**
 - JWT validation, auth (M2)
@@ -88,6 +116,7 @@ Calculate is conceptually the simplest of the three service-family Lambdas in M1
 - Complex computation (conditionals, aggregation, multi-step, lookups) — M5+
 - Async execution — M5+
 - Workbook → Verify FlowStep binding — M5+ (in Verify, reads Calculate)
+- MCP-specific production concerns (per-audience server split, OAuth, discovery) — M4
 
 ---
 
@@ -131,7 +160,7 @@ Same shape as the others.
   - User-defined functions or modules
 - **Sandboxing / resource limits:** CPU time, memory, allowed operations.
 - **Diff-on-Test:** Better Test outcome rendering with structured diffs.
-- **MCP surface.**
+- **MCP enhancements (M5+ adds new tools as features land):** Each M5+ feature ships its REST routes and matching MCP tools together. `workbooks.publish` (when versioning lands), `calculate_runs.cancel` and `calculate_runs.read_status` (when async lands), etc. The MCP surface grows alongside REST — never as a separate workstream.
 
 ---
 
@@ -174,6 +203,29 @@ POST   /v1/admin/calculate-runs/{run_id}/cancel  # action — cancel async run
 GET    /v1/admin/calculate-runs/{run_id}/status  # for async polling
 ```
 
+### MCP tool surface (M1)
+
+Single `/mcp` endpoint, CRUDLS naming, snake_case namespaces:
+
+```
+workbooks.{create, read, update, delete, list, search}
+sets.{create, read, update, delete, list}
+tests.{create, read, update, delete, list}
+tests.run                                         # action
+calculate_runs.create                             # synchronous execution in M1
+calculate_runs.{read, list, search}               # no update/delete — runs are immutable
+```
+
+### MCP tool surface (M5+)
+
+```
+workbooks.publish                                 # when versioning lands
+calculate_runs.cancel                             # when async lands
+calculate_runs.read_status                        # when async lands
+```
+
+In M4, all of the above split into per-audience MCP servers per §8.4 §9.1.
+
 ### Naming
 
 - `workbooks` (domain vocabulary)
@@ -184,6 +236,10 @@ GET    /v1/admin/calculate-runs/{run_id}/status  # for async polling
 ---
 
 ## 5. M1 acceptance criteria
+
+When M1 is done, **both surfaces work**.
+
+### REST (curl) — full lifecycle
 
 ```bash
 # Create a Workbook with a trivial computation
@@ -235,13 +291,30 @@ curl -X POST http://localhost:8002/v1/admin/tests/$TEST/run \
 # Expected: { "passed": true, "actual_outputs": {"score": 21}, ... }
 ```
 
-Plus all §8.4 conventions visible.
+### MCP (Inspector) — full lifecycle
+
+With `INSDI_DEBUG_PRINCIPAL_ID=au_dev_1`, connect MCP Inspector to `http://localhost:8002/mcp`:
+
+1. `tools/list` enumerates: `workbooks.{create,read,update,delete,list,search}`, `sets.{create,read,update,delete,list}`, `tests.{create,read,update,delete,list}`, `tests.run`, `calculate_runs.{create,read,list,search}`
+2. Call `workbooks.create` with the same payload as the curl script above → returns Workbook response
+3. Call `calculate_runs.create` with `{ workbook_id: WB, input: {field_a: 5, field_b: 3} }` → returns CalculateRun with `status="completed"`, `outputs={"score": 13}`
+4. Call `calculate_runs.create` with `{ workbook_id: WB, submission_id: ... }` → executes against the submission's body
+5. Call `tests.create` and then `tests.run` → returns `{ passed: true, actual_outputs, expected_outputs, diff }`
+6. Error rendering: `calculate_runs.create` with a workbook that has invalid syntax in its definition → returns `isError: true` with a `validation.invalid_workbook_definition` (or similar) problem+json body
+7. `calculate_runs.list` with cursor pagination works correctly
+
+### Parity check
+
+A Workbook created via REST is executable via MCP and vice versa. Tests defined via either surface run identically. Same `outputs` returned regardless of which surface invoked.
+
+Plus all §8.4 conventions visible in the responses on both surfaces.
 
 ---
 
 ## 6. Things to watch
 
-- **Expression evaluator security:** Use a safe library; never `eval`. Whatever's chosen in M1 P6 should be sandboxed enough that a malicious Workbook can't break out. M5+ may add stricter sandboxing.
-- **Lambda timeout:** Synchronous execution in M1 means Workbook complexity is bounded by the Lambda timeout (15 minutes max, default much lower). A trivial scorer is fine; complex Workbooks need M5+ async.
+- **Expression evaluator security:** Use a safe library; never `eval`. Whatever's chosen in M1 P6 should be sandboxed enough that a malicious Workbook can't break out. M5+ may add stricter sandboxing. This applies equally regardless of whether the Workbook was created/executed via REST or MCP.
+- **Lambda timeout:** Synchronous execution in M1 means Workbook complexity is bounded by the Lambda timeout (15 minutes max, default much lower). A trivial scorer is fine; complex Workbooks need M5+ async. MCP tool calls have the same timeout — they're served by the same Lambda.
 - **Submission read pattern:** Same as Verify — Calculate reads Gather's Submission table via direct SQL on the shared schema. The Submission ORM lives in `_commons_pending/`.
-- **The verb naming carve-out:** `POST /v1/admin/tests/{test_id}/run` is an action — verb after the noun-shaped sub-path per §8.4 §1.3 (`Actions are POST to noun-shaped sub-paths, not verbs in the path`). The action's *name* (`run`) is a verb; the path *shape* (`/tests/{id}/run`) is still noun-then-action. This is consistent with `templates/{id}/publish` and `flow-runs/{id}/advance`.
+- **The verb naming carve-out:** `POST /v1/admin/tests/{test_id}/run` is an action — verb after the noun-shaped sub-path per §8.4 §1.3 (`Actions are POST to noun-shaped sub-paths, not verbs in the path`). The action's *name* (`run`) is a verb; the path *shape* (`/tests/{id}/run`) is still noun-then-action. This is consistent with `templates/{id}/publish` and `flow-runs/{id}/advance`. The MCP equivalent (`tests.run`) follows the `noun.verb` ordering — same convention, surface-appropriate syntax.
+- **CRUDLS vs computed-action distinction:** `tests.run` is *not* a CRUDLS member — it's a domain action. CRUDLS-named tools (`tests.read`, etc.) do plain CRUD. Actions get their own tool names (`tests.run`, `workbooks.publish`). Don't conflate.

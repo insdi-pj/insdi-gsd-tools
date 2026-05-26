@@ -7,14 +7,28 @@ This folder contains the GSD project briefs for the four insdi service Lambdas. 
 ```
 gsd-briefs/
 ├── _shared/
-│   ├── INSDI_GSD_PRINCIPLES.md         ← How to structure milestones and phases (layered complexity)
-│   ├── INSDI_API_CONVENTIONS.md        ← §8.4 conventions distilled to a quick lookup
+│   ├── INSDI_GSD_PRINCIPLES.md         ← How to structure milestones and phases (layered complexity + MCP parity)
+│   ├── INSDI_API_CONVENTIONS.md        ← §8.4 conventions distilled (REST + MCP)
 │   └── INSDI_COMMONS_PROTOCOL.md       ← How to handle insdi-commons references
 ├── platform-service.md                 ← Trust kernel: identity, auth, Orgs, Workspaces, etc.
 ├── gather-service.md                   ← Data collection: Templates, Links, Submissions
 ├── verify-service.md                   ← Workflow: Flows, FlowSteps, FlowRuns
 └── calculate-service.md                ← Computation: Workbooks, Sets, Tests, CalculateRuns
 ```
+
+## MCP from day one
+
+insdi is an AI-native platform — its API is *equally* a contract for humans (REST) and for AI agents (MCP). §8.4 §1.4 and §9.3 mandate that REST and MCP are "two surfaces over one state machine," structurally enforced by co-locating both in the same service Lambda. The briefs reflect this: **every M1 phase that adds a REST route ships its matching MCP tool in the same PR**.
+
+What this means concretely:
+- M1 ships both surfaces with no auth — REST uses `X-Debug-Principal-Id`, MCP uses `INSDI_DEBUG_PRINCIPAL_ID` env var, both resolve to the same `UserContext`
+- M2 wires Cognito auth onto both surfaces — same `UserContext`, same use-case functions, surface-adapted auth wire formats
+- M3 wires audit emission once (in use-case functions); both surfaces emit identical audit events
+- M4 introduces MCP-specific production architecture (per-audience server split, OAuth at session, `.well-known/mcp`, build-time manifest assembly)
+
+MCP tools follow CRUDLS naming: `<resource>.{create, read, update, delete, list, search}`. Note `read` (not `get`). Resources use snake_case in MCP namespaces (`flow_runs`, not `flow-runs`); REST paths remain kebab-case.
+
+Local MCP testing uses MCP Inspector: `npx @modelcontextprotocol/inspector http://localhost:8000/mcp`. Every M1 acceptance criteria has both a curl section and an Inspector section.
 
 ## How to use
 
