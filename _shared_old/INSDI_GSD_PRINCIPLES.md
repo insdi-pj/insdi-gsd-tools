@@ -247,79 +247,14 @@ A few things legitimately differ between REST and MCP — these aren't parity vi
 
 The use-case function doesn't know about these — it accepts a `UserContext` and an input model, returns a response model or raises a typed exception. The surface adapters handle the rest.
 
-### 3.7 Use the `/mcp-builder` skill to build the MCP surface — bounded to these conventions
-
-When a phase actually implements the MCP surface (the scaffold in M1 P1, every entity's tools thereafter, the M4 production split), **invoke the `/mcp-builder` skill** and apply its practices and knowledge — transport setup, tool/`inputSchema` generation from Pydantic models, tool-description quality, error-content shaping, MCP Inspector testing, and current MCP-spec correctness.
-
-**Scope guardrail — the skill implements, it does not design or rescope.** The *established goal* is fixed by this document (§3.1–§3.6), §8.4 §9, and the service brief: co-location at `/mcp` on the same FastAPI Lambda, streamable HTTP transport, CRUDLS naming (`read` not `get`), `noun.verb` action ordering, kebab-case URL → snake_case namespace translation, thin tools delegating to the one `services/` use-case function, the same Pydantic models as both REST body and MCP `inputSchema`, the shared error builder wrapped as `isError: true` content, and the M1-single-endpoint → M4-per-audience-split milestone shape. `/mcp-builder` is the instrument that implements *that* surface well — it does not get to choose a different tool taxonomy, introduce a parallel business-logic path, change the naming convention, alter which milestone ships which MCP concern, or otherwise redefine the surface.
-
-If the skill's recommended best practice conflicts with an insdi convention (e.g. it favours `verb_noun` tool names, or stdio transport, or fat tools that embed logic), **the insdi convention wins** — note the divergence in the tool description per §8.4 §9.4 and surface it to PJ rather than silently adopting the skill's default. The skill supplies the rigour and the up-to-date MCP knowledge; the principles, §8.4, and the brief supply the design and the scope.
-
 ---
 
-## 4. Typed-content discipline (no `dict[str, Any]` for substantive content)
-
-A corollary of MCP parity (§3) that's important enough to call out separately.
-
-> **Substantive content fields use typed Pydantic models from `insdi-commons`. Never `dict[str, Any]`, never `Json`, never an untyped JSONB pass-through.**
-
-### Why this matters
-
-MCP's `inputSchema` is generated from the Pydantic models. If a Template's `schema` field, a Flow's `definition`, a Workbook's `definition`, or a `submitter_allowlist` is typed as `dict`, the AI client sees `{"type": "object"}` — the outer shape, but none of the rules governing the inner content. When an admin says "create a patient intake form," the AI must guess the field-definition shape, producing inconsistent or invalid output. The "structurally enforced contract" promise of MCP breaks down at the most important boundary: the substantive content.
-
-When the same field is typed (e.g. `commons.schemas.TemplateSchema`), `inputSchema` carries the full structure — allowed field types as `Literal` enums, type-specific constraints via discriminated unions, validation rules. The AI sees the constraints and can produce valid input on the first try. Pydantic enforces it before the use-case function runs.
-
-### What this means for M1
-
-Content-bearing entity fields use typed commons models from M1 P1. This is not a refinement to add later — it's the foundation that makes the M1 MCP surface genuinely AI-usable.
-
-Concrete examples:
-- `TemplateCreateInput.schema: commons.schemas.TemplateSchema` — not `dict`
-- `FlowCreateInput.definition: commons.schemas.FlowDefinition` — not `dict`
-- `WorkbookCreateInput.definition: commons.schemas.WorkbookDefinition` — not `dict`
-- `Organisation.submitter_allowlist: commons.schemas.SubmitterAllowlist | None` — not `dict`
-- Submission body: typed shape derived from or constrained by `TemplateSchema`
-
-Per PJ's direction, most of these are already defined in `insdi-commons` and should be referenced from M1 P1.
-
-### When commons is incomplete
-
-Follow §5 below (`insdi-commons` relationship). If commons' current content model misses something insdi v2 needs, **don't shadow it locally with an untyped blob** — schedule a commons update. The fallback (local `_commons_pending/` impl matching the eventual commons shape) is still typed, never `dict`.
-
-### Carve-out: opaque pass-through fields
-
-A few fields legitimately are content-agnostic and stay typed as flexible structures:
-- `audit_event.payload_diff` — varies wildly by event type; typed as `dict[str, JsonValue]` is acceptable, since audit events are write-only and never consumed by a tool-input contract
-- `calculate_run.outputs` — the shape depends on the Workbook's `outputs` definition; can be typed as `dict[str, JsonValue]` if shape varies per Workbook, but try to type it as a model derived from the Workbook's definition first
-
-The test: **would an AI client need to construct or validate this field?** If yes, type it. If it's purely server-emitted observability or per-instance variable, a flexible structure is acceptable.
-
-### The drafting-tool progression (M5+, per-service)
-
-Typed content models make `templates.create` (etc.) usable by AI clients. But there's a higher-value AI use case that typed models alone don't unlock: **natural-language description → fully-formed input**. An admin says *"create a patient intake form with name, DOB, and consent"*; today the calling client's AI translates this into a `TemplateCreateInput`. That translation is meaningful work that insdi should own — it has the best context about insdi-specific conventions, common patterns, and accessibility defaults.
-
-Each service eventually grows a drafting tool alongside `.create`:
-
-```
-templates.draft_from_description       → proposes a TemplateCreateInput
-flows.draft_from_description           → proposes a FlowCreateInput
-workbooks.draft_from_description       → proposes a WorkbookCreateInput
-```
-
-The drafting tool is a server-side LLM-backed use-case function with insdi's own curated prompt + few-shot examples. Output is a proposed input model + rationale + alternatives. The admin reviews, adjusts, calls `.create` with the final shape.
-
-**These are M5+ work, not M1.** Drafting tools require: typed content models proven in production, a corpus of successful inputs to draw few-shot examples from, prompt-engineering and evaluation effort, LLM-cost decisions. Premature drafting tools produce inconsistent output that erodes trust in the platform. Build the structured surface right first; layer the natural-language surface on top later.
-
-Each service brief calls out its specific drafting-tool roadmap.
-
----
-
-## 5. Phase shape within a milestone
+## 4. Phase shape within a milestone
 
 Inside each milestone, phases follow the same principle one level down: **each phase ships one runnable slice**, not one runnable feature-with-no-tests. The slice has:
 
 - One coherent capability (typically one entity or one workflow)
-- All §8.4 conventions correctly applied to that capability — **including MCP parity (§3) and typed-content discipline (§4)**
+- All §8.4 conventions correctly applied to that capability — **including MCP parity (§3 above)**
 - Tests passing for that capability — on both REST and MCP surfaces
 - Existing capabilities still work — on both surfaces
 
@@ -331,7 +266,7 @@ A reasonable phase size: one entity's CRUDLS + a meaningful subset of its routes
 
 ---
 
-## 6. The `insdi-commons` relationship
+## 5. The `insdi-commons` relationship
 
 `insdi-commons` is a separate existing GSD project hosting Pydantic models, SQLAlchemy ORMs, FastAPI dependency functions, audit helpers, the structured logger, link-scoped JWT issuance, the event-schema registry, and other shared code per §8.2 §1.1.
 
@@ -365,7 +300,7 @@ The first three are likely needed in M1. The auth-related ones come in at M2. Th
 
 ---
 
-## 7. The §8.4 reference protocol
+## 6. The §8.4 reference protocol
 
 §8.4 (API Surface — REST + MCP) at `https://www.notion.so/36bc041b93b481aa85dcde3a1db13d74` is the **single source of truth** for API conventions. Every service follows it.
 
@@ -384,7 +319,7 @@ Other §8.x pages worth knowing about:
 
 ---
 
-## 8. When in doubt — grill, don't guess
+## 7. When in doubt — grill, don't guess
 
 PJ's working style: decisions are grilled before being locked. This applies to GSD too.
 
@@ -396,29 +331,11 @@ If a phase plan involves a decision that's not explicitly settled in the service
 
 — **do not just pick one in the plan.** Surface the question during `/gsd-discuss-phase` and have the user resolve it. The discuss step exists for exactly this purpose; use it.
 
-### Use the `/grill-me` skill to force the decision
-
-Surfacing a question is necessary but not sufficient — a question parked in a plan is easy to wave through. When a decision is genuinely open, **invoke the `/grill-me` skill** to drive it to a precise, locked answer before the plan proceeds. `/grill-me` is PJ's preferred mechanism for exactly this: it challenges the assumptions behind the decision, forces the trade-offs into the open with concise pros/cons, and refuses to let a vague "we'll figure it out later" stand in for a real decision.
-
-Invoke `/grill-me` when:
-
-- A phase plan depends on a decision not settled in the service brief or §8.4 (the examples above)
-- PJ explicitly asks to be grilled on a plan or design
-- A previously locked decision is being reopened and the contradiction needs resolving (see below)
-
-How it fits the GSD flow:
-
-- During `/gsd-discuss-phase`, when an open decision appears, run `/grill-me` on it rather than recording a tentative answer. The grilled outcome is what gets locked in `CONTEXT.md`.
-- A `/grill-me` session produces a *decision with its rationale*, not just a choice. Record both — a later milestone needs to see **why** a decision was made, not only what it was.
-- Don't `/grill-me` decisions that §8.4 or the brief already settle — that's churn. Reserve it for genuinely open choices.
-
-**Scope guardrail — the skill resolves, it does not rescope.** This document, the service brief, and the `/gsd-discuss-phase` step decide *what* gets grilled. `/grill-me` is the instrument that drives an already-identified decision to a precise answer — it does not get to redefine, broaden, narrow, or redirect the question on its own. If grilling surfaces that the real decision is different from or larger than what was put on the table, **stop and surface that to PJ as an explicit scoping change** — don't let the skill silently expand the scope or swap one decision for another mid-grill. The skill supplies the rigour; the principles and the brief supply the agenda.
-
-Once a decision is locked in `CONTEXT.md`, downstream phases follow it. If a later decision contradicts an earlier one, surface the conflict explicitly — don't quietly let one win; re-run `/grill-me` on the conflict if the right resolution isn't obvious.
+Once a decision is locked in `CONTEXT.md`, downstream phases follow it. If a later decision contradicts an earlier one, surface the conflict explicitly — don't quietly let one win.
 
 ---
 
-## 9. Convention compliance is part of `/gsd-verify-work`
+## 8. Convention compliance is part of `/gsd-verify-work`
 
 `/gsd-verify-work` for any insdi service must verify:
 
@@ -428,75 +345,20 @@ Once a decision is locked in `CONTEXT.md`, downstream phases follow it. If a lat
 - Pagination follows §8.4 §4.1
 - Status codes follow §8.4 §5.5
 - Naming follows §8.4 §1.3 (kebab-case, plural-noun, domain vocabulary)
-- **MCP parity** (§3): every REST route in scope for the milestone has a matching MCP tool calling the same use-case function; every MCP tool has tests; MCP Inspector successfully enumerates and exercises the tools added in this phase
+- **MCP parity** (§3 above): every REST route in scope for the milestone has a matching MCP tool calling the same use-case function; every MCP tool has tests; MCP Inspector successfully enumerates and exercises the tools added in this phase
 - **CRUDLS naming on MCP tools:** `<resource>.create`, `.read`, `.update`, `.delete`, `.list`, `.search` (not `.get`)
-- **Typed-content discipline** (§4): no `dict[str, Any]` or `Json` for substantive content fields. Templates' `schema`, Flows' `definition`, Workbooks' `definition`, allowlists, etc. use typed commons models. Carve-outs (audit payload diffs, etc.) are explicitly justified.
 - The milestone's deferred concerns are *not present yet* (e.g. M1 work should not contain JWT validation code on either surface; M2 should not contain audit emission code)
 
 A verify step that catches "this is correct but for a later milestone" is doing its job — that work either gets moved or the milestone scope gets adjusted, but it doesn't ship muddled.
 
 A verify step that catches "this REST route has no matching MCP tool" or "this MCP tool reimplements business logic instead of calling the use-case function" is doing its job — the missing tool gets added, or the duplicated logic gets extracted.
 
-A verify step that catches "this content field is typed as `dict`" is doing its job — that field gets typed against the appropriate commons model, or the gap is surfaced for a commons update.
-
 ---
 
-## 10. Tooling skills — instruments, not authors
-
-insdi GSD work uses several named Claude skills to *execute* well. They share one rule, identical to the guardrails already stated for `/mcp-builder` (§3.7) and `/grill-me` (§8):
-
-> **A skill is an instrument. This document, §8.4, and the service brief own the goal and the scope. A skill supplies rigour, current best-practice, and mechanical execution — it never gets to redefine *what* is built, *what* is tested, *what* is decided, or *what* is documented. On any conflict between a skill's default and an insdi convention, the insdi convention wins; note the divergence and surface it.**
-
-The register:
-
-| Skill | Used for | Detailed in |
-|---|---|---|
-| `/grill-me` | Driving a genuinely open decision to a precise, locked answer | §8 |
-| `/mcp-builder` | Implementing the MCP surface | §3.7 |
-| `/generate-tests` | Writing a phase's test suites | §10.1 |
-| `/generate-docs` | Writing inline code documentation (docstrings/comments) | §10.2 |
-
-### 10.1 `/generate-tests`
-
-Use it to write a phase's tests once the code exists. It detects the stack, follows the project's test conventions, mirrors the source tree under `tests/`, and writes behavior-driven pytest tests (named for behavior, Arrange/Act/Assert, asserting on contracts not internals). It also flags logically-questionable-but-technically-valid behavior with `@pytest.mark.review` — treat those findings as input to a `/grill-me`-style decision, **not** as a licence for the skill to change the model or the test scope on its own.
-
-It takes arguments, and **different combinations cover different test layers** — invoke it once per layer rather than expecting a single call to do everything:
-
-```
-/generate-tests @<file> [--depth=basic|standard|full] [--type=unit|integration|contract] [--mock=none|external|all]
-```
-
-- **`--type=contract`** — Pydantic schema validation (what input is accepted/rejected, required fields, constraint enforcement). Run on every `schemas/` model. This is how typed-content discipline (§4) earns test coverage: the discriminated-union / `Literal` constraints on `TemplateSchema`, `FlowDefinition`, `WorkbookDefinition`, etc. get contract-tested.
-- **`--type=unit`** — isolated logic, dependencies mocked. Run on `services/` use-case functions and the helper layer (pagination, filter parser, error builder).
-- **`--type=integration`** — real component interaction, mocking only at boundaries. Run on `api/` REST handlers and `mcp/` tools — this is where the MCP-parity round-trip / cross-surface-equivalence tests live (create via REST, read via MCP).
-- **`--depth`** scales with the milestone — `standard` (the default) for normal work; reach for `full` (boundary/null/error/permission cases) on security-sensitive surfaces and as a milestone matures. `basic` only for throwaway spikes.
-- **`--mock`** — `external` (the default) mocks DB / AWS / HTTP boundaries and suits most insdi tests; `none` for genuine end-to-end checks against local Postgres/DynamoDB.
-
-Mapping to the per-phase test structure in §3.5:
-
-| Test location | Invocation |
-|---|---|
-| `tests/services/<entity>.py` | `--type=unit --mock=external` |
-| `tests/api/<entity>.py`, `tests/mcp/<entity>.py` | `--type=integration` |
-| schema tests | `--type=contract` |
-
-**On "end-to-end":** the skill's `--type` vocabulary is `unit | integration | contract` — there is **no** `e2e` value. insdi's end-to-end layer is the full-lifecycle acceptance script in each brief's M1 acceptance criteria (the curl + MCP-Inspector walkthrough). Express its automated form as `--type=integration --mock=none` against the local stores — don't expect or invent a separate skill mode for it.
-
-### 10.2 `/generate-docs`
-
-Use it to add **inline documentation** — module/class/function docstrings with `Args`/`Returns`/`Raises`, and comments on non-obvious logic — directly in source files. It documents only the file or line-range you name (it does not auto-scan the project), and it never alters code logic.
-
-**Scope boundary worth knowing:** `/generate-docs` writes docs *in the code*; it deliberately does **not** create separate documentation files. Project-level prose docs — `PROJECT.md`, `REQUIREMENTS.md`, `ROADMAP.md`, `README.md`, the M1 acceptance/test scripts — are GSD artefacts (and `/gsd-docs-update` territory), **not** `/generate-docs` output. Don't point it at them. MCP tool descriptions per §8.4 §9.7 *are* code (they live in the `@mcp_tool` decorator) and are fair game.
-
----
-
-## 11. Summary — the rules
+## 9. Summary — the rules
 
 1. **Convention before complexity.** §8.4 conventions are non-negotiable from M1 P1. Complexity layers in over milestones.
 2. **MCP parity is a convention, not complexity.** Every REST route ships with its matching MCP tool from M1 P1. Both surfaces call the same use-case function. Local-testable with MCP Inspector.
-3. **Typed-content discipline from M1.** Substantive content fields use typed Pydantic models from commons. Never `dict[str, Any]`. This is what makes the MCP surface genuinely AI-usable.
-4. **Each milestone is runnable.** A milestone that doesn't produce a curl-able API AND an MCP-Inspector-exercisable tool surface on completion is not done.
-5. **Don't reach forward.** A phase doesn't contain pieces of the next milestone's concern.
-6. **insdi-commons is the source of truth for shared code.** Local implementations are temporary and tracked.
-7. **Drafting tools come later.** Natural-language → structured-input tools (e.g. `templates.draft_from_description`) layer on M5+, after the structured surface and typed content models are proven.
-8. **Skills are instruments, not authors.** `/grill-me`, `/mcp-builder`, `/generate-tests`, `/generate-docs` execute the goal this doc + §8.4 + the brief define — they never rescope it. On any conflict, the insdi convention wins (§10).
+3. **Each milestone is runnable.** A milestone that doesn't produce a curl-able API AND an MCP-Inspector-exercisable tool surface on completion is not done.
+4. **Don't reach forward.** A phase doesn't contain pieces of the next milestone's concern.
+5. **insdi-commons is the source of truth for shared code.** Local implementations are temporary and tracked.

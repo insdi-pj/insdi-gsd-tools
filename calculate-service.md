@@ -98,7 +98,9 @@ Each entity-phase delivers REST routes AND matching MCP tools in the same PR per
 - **P10 — Polish:** Manual test script for REST (curl) and MCP (Inspector session). OpenAPI + `tools/list` sanity checks.
 
 **Decisions to grill in `/gsd-discuss-phase 1`:**
-- Workbook `definition` shape — what's the M1 minimum? A flat `{ outputs: { name: expression } }` is small enough. Or do we want intermediate variables, conditionals, etc.?
+- **Confirm the Workbook `definition` field uses the typed `insdi-commons` model, not `dict`.** Per principles doc §4, the WorkbookDefinition shape comes from `commons.schemas.WorkbookDefinition` — so MCP's `inputSchema` for `workbooks.create` carries the full structure (allowed expression types, output declarations, intermediate variables if supported) and AI clients can produce valid input on the first try. If commons' current shape is too minimal for what you want M1 to support, schedule a commons extension — don't shadow locally with `dict`.
+- Workbook `definition` *content* coverage in M1 — what's the smallest supported subset? A flat `{ outputs: { name: expression } }` (no intermediates, no conditionals)? Confirm what commons currently supports vs what M1 needs
+- Set's `inputs` and Test's `expected_outputs` — also typed via commons (likely a `dict[str, JsonValue]` keyed by field id is appropriate here, but the keys should be constrained by the bound Workbook's inputs; check if commons has a typed shape for this)
 - Expression evaluator library — `asteval`, `simpleeval`, custom? Security matters — never use raw `eval`
 - Set: nested-only or flat-with-FK
 - Sync vs async CalculateRun in M1 — strongly recommend sync (Lambda timeout permitting). Async needs a Step Functions or worker pattern; M5+ work
@@ -160,6 +162,8 @@ Same shape as the others.
   - User-defined functions or modules
 - **Sandboxing / resource limits:** CPU time, memory, allowed operations.
 - **Diff-on-Test:** Better Test outcome rendering with structured diffs.
+- **`workbooks.draft_from_description` (M6+, post-stability):** A natural-language → WorkbookDefinition drafting tool. Admin says *"score a loan application based on income, credit history, and debt-to-income ratio"*; the tool returns a proposed `WorkbookCreateInput` with rationale and alternatives. Backed by insdi-controlled LLM call. **Requires:** typed `WorkbookDefinition` proven in production with conditionals and intermediates, a corpus of successful Workbooks for few-shot examples, evaluation harness (the drafting tool itself produces Workbooks; Tests are the natural evaluation mechanism — "draft a Workbook from this description, then check it passes these Tests"). See `INSDI_GSD_PRINCIPLES.md` §4 for the full progression rationale.
+- **`workbooks.suggest_tests` (M6+):** Given an existing Workbook, propose Tests that meaningfully cover its branches. Pairs naturally with the drafting tool.
 - **MCP enhancements (M5+ adds new tools as features land):** Each M5+ feature ships its REST routes and matching MCP tools together. `workbooks.publish` (when versioning lands), `calculate_runs.cancel` and `calculate_runs.read_status` (when async lands), etc. The MCP surface grows alongside REST — never as a separate workstream.
 
 ---

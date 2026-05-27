@@ -30,6 +30,31 @@ MCP tools follow CRUDLS naming: `<resource>.{create, read, update, delete, list,
 
 Local MCP testing uses MCP Inspector: `npx @modelcontextprotocol/inspector http://localhost:8000/mcp`. Every M1 acceptance criteria has both a curl section and an Inspector section.
 
+## Typed content from day one — the AI usability principle
+
+A corollary of MCP parity that comes up across the briefs: **substantive content fields use typed Pydantic models from `insdi-commons`, never `dict[str, Any]`**.
+
+When an admin tells an AI client *"create a patient intake form with name, DOB, allergies, and a consent checkbox"*, the AI calls `templates.create`. If the Template's `schema` field is typed as `dict`, the AI sees only `{"type": "object"}` in the MCP `inputSchema` and must guess at the inner shape — producing inconsistent results and breaking the MCP-as-AI-contract promise. With a typed `commons.schemas.TemplateSchema`, the AI sees allowed field types as `Literal` enums, discriminated unions for type-specific constraints, and required vs optional sub-fields. It produces structurally-valid input on the first try.
+
+Per PJ's direction, most entity-content Pydantic models are already defined in `insdi-commons` and are referenced from M1 P1. This applies to:
+- Template `schema` (Gather)
+- Flow `definition` (Verify)
+- Workbook `definition` (Calculate)
+- `submitter_allowlist`, `auth_required_floor` (Platform; used cross-service via the policy chain)
+
+See `_shared/INSDI_GSD_PRINCIPLES.md` §4 for the full discipline.
+
+## The drafting-tool progression (M5+, per service)
+
+Typed content models make the `<resource>.create` family AI-usable. A higher-value AI pattern comes later: **natural-language description → fully-formed input**. Each service eventually grows a drafting tool:
+
+- `templates.draft_from_description` (Gather, M5 or M6)
+- `flows.draft_from_description` (Verify, M6+)
+- `workbooks.draft_from_description` (Calculate, M6+)
+- `organisations.draft_policies_from_description` (Platform, M6+)
+
+These are backed by insdi-controlled LLM calls with curated prompts and few-shot examples. The admin describes intent, the tool proposes a structured input with rationale, the admin reviews and confirms before calling `.create`. **They land M5+ — never in M1.** Drafting tools require the structured surface to be proven, the typed content models to be stable, and a corpus of successful production inputs to draw few-shot examples from. Premature drafting tools produce inconsistent output that erodes trust in the platform.
+
 ## How to use
 
 For each service, in its dedicated repo:

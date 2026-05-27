@@ -8,7 +8,7 @@ This document captures the §8.4 rules that come up most often during implementa
 ---
 
 ## URL structure
-d
+
 ```
 /v{N}/{namespace}/{resource}[/{id}[/{sub-resource}[/{sub-id}...]]]
 ```
@@ -363,61 +363,6 @@ This pattern is established and consistent. The brief for each service spells ou
 
 ---
 
-## Typed-content discipline
-
-> **Substantive content fields use typed Pydantic models from `insdi-commons`. Never `dict[str, Any]`, never `Json`, never an untyped JSONB pass-through.**
-
-This is the rule that makes the MCP surface genuinely AI-usable. The `inputSchema` MCP exposes is generated from the Pydantic models; untyped fields show up as `{"type": "object"}` and force AI clients to guess at the inner shape.
-
-### What "substantive content" means
-
-A content field is substantive when an AI client would need to construct it. Examples:
-
-| Field | Wrong | Right |
-|---|---|---|
-| Template's field definitions | `schema: dict[str, Any]` | `schema: commons.schemas.TemplateSchema` |
-| Flow's step graph | `definition: dict` | `definition: commons.schemas.FlowDefinition` |
-| Workbook's computation rules | `definition: dict` | `definition: commons.schemas.WorkbookDefinition` |
-| Org/Workspace/Template/Link allowlist | `submitter_allowlist: dict \| None` | `submitter_allowlist: commons.schemas.SubmitterAllowlist \| None` |
-| Submission body (the actual collected data) | `body: dict` | A typed shape that matches the Template's `schema` |
-
-Per PJ's direction: most of these commons models already exist. Reference them from M1 P1.
-
-### When commons is incomplete
-
-Per `INSDI_COMMONS_PROTOCOL.md`. If a commons model is missing a needed shape (a new field type, a new policy structure), surface the gap during discuss and schedule a commons update. **Don't shadow it locally with `dict`** — the local fallback is still typed, matching the eventual commons shape.
-
-### Carve-outs
-
-A few fields legitimately stay as flexible structures:
-
-- **`audit_event.payload` / `payload_diff`** — varies wildly by event type and is write-only (never appears in tool inputs). `dict[str, JsonValue]` is acceptable.
-- **`calculate_run.outputs`** — shape depends on the Workbook's `outputs` definition; varies per Workbook. Typing it generically (`dict[str, JsonValue]`) is acceptable IF a Workbook-shaped derivation is impractical.
-- **`Organisation.metadata` / arbitrary client tagging fields** — when clients are explicitly allowed to attach unstructured data, the field is typed `dict[str, JsonValue]` and the description names it as such.
-
-The test: **would an AI client need to construct or validate this field?** If yes → type it. If it's purely server-emitted observability, per-instance variable, or explicitly client-arbitrary → flexible structure is acceptable.
-
-### Why this matters in practice
-
-When an admin says *"create a patient intake form with name, DOB, allergies, and a consent checkbox"*, the AI calls `templates.create`. With a typed `schema`, the AI's `inputSchema` shows:
-
-- `schema.fields` is a list of `TemplateFieldDefinition`
-- `TemplateFieldDefinition.type` is one of `text | number | date | boolean | choice | multi_choice | ...`
-- When `type == "choice"`, `options` is required
-- `label` is always required
-
-The AI generates structurally valid input on the first try. Pydantic enforces it. The use-case function receives a validated model. No guessing, no inconsistency, no validation surprises.
-
-With an untyped `schema: dict`, none of that happens — the AI guesses, different AIs produce different shapes, the validation error at create-time is unhelpful, and the MCP-as-AI-contract promise collapses.
-
-### The drafting-tool progression (M5+)
-
-Typed models make `templates.create` usable. A higher-value tool comes later: **natural-language → structured input**. See `INSDI_GSD_PRINCIPLES.md` §4 for the full progression. Each service eventually gets a `<resource>.draft_from_description` tool that uses insdi's own LLM call (with a curated prompt) to translate fuzzy admin intent into a fully-formed input model. The admin reviews and confirms before calling `.create`.
-
-These tools are M5+ work — they need the structured surface and typed content models proven first.
-
----
-
 ## Service Lambda anatomy
 
 Every service Lambda repo has the same shape (established in M1 P1):
@@ -645,9 +590,15 @@ Per §8.2 §8.5. Always-present fields on every log line: `ts`, `level`, `servic
 - Don't add Cognito or auth code to M1 — it goes in M2
 - Don't add audit emission to M2 — it goes in M3
 
-### Typed-content discipline
-- Don't type a substantive content field as `dict[str, Any]`, `Json`, or untyped JSONB — type it against a commons model
-- Don't shadow a commons model locally because it's "easier" — schedule a commons update if the model needs extending
-- Don't generate the MCP `inputSchema` from a typed model on REST and an untyped one on MCP — the same Pydantic model serves both; this is automatic when convention is followed
-- Don't ship `templates.draft_from_description` or any natural-language drafting tool in M1–M4 — these are M5+ enhancements that need the structured surface proven first
+### MCP surface
+- Don't ship a REST route without its matching MCP tool in the same PR — parity violation
+- Don't use `get` in tool names — use `read` per CRUDLS (`templates.read`, not `templates.get`)
+- Don't use `verb_noun` MCP-community style — use `noun.verb` (`templates.create`, not `create_template`)
+- Don't use hyphens in MCP tool names — use snake_case (`flow_runs.advance`, not `flow-runs.advance`); the REST path stays kebab-case
+- Don't reimplement business logic inside an MCP tool — call the use-case function in `services/` that the REST handler calls
+- Don't define a separate input schema for the MCP tool — reuse the Pydantic model from `schemas/` that the REST handler uses
+- Don't return a different error shape from MCP than from REST — the same `errors.problem_response` helper produces both; MCP just wraps in `isError: true` content
+- Don't ship a tool description that doesn't note insdi-specific deviations from MCP convention (the `noun.verb` order, `read` vs `get`, etc.) — agents reading tool docs need this context
+- Don't add `prompts` or `resources` (MCP primitive types) in M1–M3 — they're M5+ content concerns
+- Don't add OAuth-at-session-start to MCP in M1–M3 — M1 uses the `INSDI_DEBUG_PRINCIPAL_ID` env var, M2 will use real OAuth in M4+
 

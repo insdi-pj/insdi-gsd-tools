@@ -96,9 +96,10 @@ Each entity-phase delivers REST routes AND matching MCP tools in the same PR per
 - **P10 — Polish:** Manual test script that exercises the full lifecycle end-to-end on both surfaces (curl script for REST, Inspector session export for MCP). OpenAPI sanity check; MCP `tools/list` sanity check.
 
 **Decisions to grill in `/gsd-discuss-phase 1`:**
-- The Template `schema` field shape — JSON Schema? a custom shape? what field types are supported in M1 (text, number, date, choice — what about file, multi-choice, signature)?
+- **Confirm the Template `schema` field uses the typed `insdi-commons` model, not `dict[str, Any]`.** Per PJ's direction, most entity-content Pydantic models are already defined in `insdi-commons` and should be referenced from M1 — `TemplateCreateInput.schema` is typed as `commons.schemas.TemplateSchema` (or whatever the commons name is), not as an opaque blob. This is critical for MCP usability: the AI client's `tools/list` response will then carry the full structure of `TemplateSchema` (field types, allowed enum values for `field.type`, type-specific constraints) in the tool's `inputSchema`, and Pydantic enforces validity before the use-case function runs. The same applies to other content-bearing fields across all services — Flow `definition`, Workbook `definition`, `submitter_allowlist`, etc. See §6 below ("Typed-content discipline for AI usability") for the rationale.
+- Which field types `TemplateSchema` (in commons) supports today, and which are explicitly Out-of-scope for M1 vs M5+. If commons' current shape misses something insdi v2 needs (e.g. signature fields, calculated fields), that's a commons change to schedule — not a local override
 - Link `short_id` generation — short hash? human-readable? collision strategy?
-- Submission body shape — `{ "field_id": value, ... }` keyed by Template field IDs? schema-validated server-side at finalise?
+- Submission body shape — `{ "field_id": value, ... }` keyed by Template field IDs? Typed in commons or shaped from `TemplateSchema` at finalise? Confirm commons coverage
 - Whether Submission has a `status` enum and if so what values M1 needs (`finalised` is enough; `processing` and others come later)
 - DDB table shape for sessions — confirm `PK = SESSION#{id}`, `SK = META | STATE#CURRENT | EVENT#{event_id}` aligns with §8.3
 - Whether the policy chain refusal returns 422 with a structured `errors` array showing which level set what (recommended) or just a single error
@@ -384,7 +385,97 @@ The full lifecycle round-trips cleanly between surfaces — e.g. create a Templa
 
 ---
 
-## 7. Things to watch / known tensions
+## 7. Typed-content discipline for AI usability
+
+This section captures a principle that applies across all four services but lands most visibly in Gather. **Read this carefully — getting it right in M1 is what makes the MCP surface genuinely AI-usable.**
+
+### The problem
+
+If a Pydantic model uses `dict[str, Any]` or `Json` for substantive content fields (the Template's `schema`, the Flow's `definition`, the Workbook's `definition`, a `submitter_allowlist`, etc.), then JSON Schema generation produces `{"type": "object"}` for those fields. The AI client sees the *outer* shape but not the *inner* content rules. When an admin tells the AI *"create a patient intake form with name, DOB, allergies, and a consent checkbox"*, the AI must guess the inner shape — which produces inconsistent results, doesn't fail loudly when wrong, and effectively breaks the "structurally enforced contract" promise of MCP.
+
+### The discipline
+
+**Every substantive content field uses a typed Pydantic model from `insdi-commons`** (or a service-local typed model if it's domain-internal). Never `dict[str, Any]`, never `Json`, never an untyped JSONB pass-through. The model captures:
+
+- Allowed field types (Literal-typed enums)
+- Type-specific constraints (e.g. `options: list[str]` required when `type == "choice"`)
+- Required vs optional sub-fields
+- Validation constraints (length, range, regex)
+
+For Templates, this means `TemplateCreateInput.schema` is typed as `commons.schemas.TemplateSchema` (or whatever the canonical commons name is). `TemplateSchema` itself contains a `fields: list[TemplateFieldDefinition]`, and `TemplateFieldDefinition` is a discriminated union over field types (`TextFieldDef | NumberFieldDef | DateFieldDef | ChoiceFieldDef | ...`).
+
+When the AI calls `tools/list`, its `inputSchema` for `templates.create` now includes the full `TemplateSchema` structure. The AI sees:
+- `type` is a `Literal["text", "number", "date", "boolean", "choice", "multi_choice"]`
+- `options` is required when `type == "choice"` (via the discriminated union)
+- `validation` has a known structure
+
+It can then generate a structurally-valid `TemplateCreateInput` for the patient-intake description on the first try, with no guessing.
+
+### What goes in commons vs locally
+
+- **In `insdi-commons`:** Models that more than one service needs, OR models that define cross-service content contracts. `TemplateSchema`, `TemplateFieldDefinition`, `SubmitterAllowlist`, `AuthFloor`, `EntityRef`, the Submission body shape (since Verify/Calculate read it).
+- **Local to the service:** Models for genuinely internal-only content. Rare for content fields — most content is consumed by at least one other service.
+
+### Where commons is incomplete
+
+If `insdi-commons` has a model that needs extending for v2 (e.g. a new field type is required), **don't shadow it locally** — schedule a commons update. Following `_shared/INSDI_COMMONS_PROTOCOL.md`, the service GSD project surfaces the gap during discuss and the user decides whether commons gets updated first or the field type ships in M5+.
+
+### The drafting-tool progression (M5+ / M6+)
+
+Even with fully-typed content models, there's a higher-value AI use case waiting: **natural-language description → fully-formed input**.
+
+The current Template creation flow with typed models works like this:
+1. Admin: *"create a patient intake form with name, DOB, allergies, and consent"*
+2. AI client interprets, calls `templates.create` with a structurally-valid `TemplateCreateInput`
+3. Server creates the Template
+
+This already works because of the typed models. **But the AI is doing meaningful work that should be insdi's responsibility, not the client's:** translating fuzzy intent into precise structured input, with insdi-specific knowledge of best practices (field naming, validation defaults, accessibility, common patterns for medical/financial/educational forms, etc.).
+
+A drafting tool reverses the responsibility:
+
+```
+templates.draft_from_description →
+   Input: { workspace_id, description, hints? }
+   Output: {
+     proposed_input: TemplateCreateInput,
+     rationale: str,                            # "I included consent because medical forms typically require it"
+     warnings: list[str],                       # "DOB validation requires confirming jurisdiction"
+     alternatives: list[TemplateCreateInput]    # other valid framings the admin might prefer
+   }
+```
+
+The drafting tool is backed by a use-case function `services.templates.draft_from_description()` that uses insdi's own LLM call (Anthropic API) under the hood, with a curated system prompt encoding insdi's Template best practices and few-shot examples drawn from successful Templates in the platform.
+
+The admin's flow becomes:
+1. Admin: *"create a patient intake form..."*
+2. AI client calls `templates.draft_from_description(description=...)`
+3. AI presents proposed Template + rationale to admin
+4. Admin reviews, adjusts, confirms
+5. AI calls `templates.create(input=...)` with the (possibly tweaked) proposed input
+
+**Why this is a separate tool, not built into `templates.create`:**
+- `templates.create` stays deterministic, structurally pure, fast, cheap
+- Drafting is an LLM-dependent operation with cost, latency, and quality variance — admins should opt into it explicitly
+- The drafting prompt and few-shot examples are themselves a product asset insdi controls and improves — not exposed to the client's AI
+- Audit-able as a discrete server-side action
+- The same pattern composes across services (see roadmap below)
+
+**Why this lands in M5+, not M1:** Drafting requires (a) the create path to be solid and the typed models to be stable, (b) a meaningful corpus of successful insdi Templates to draw few-shot examples from, (c) prompt-engineering and evaluation effort, (d) LLM cost/billing model decisions. Premature drafting tools produce inconsistent results that erode trust in the platform. Get the structured surface right first; layer the natural-language surface on top once the structured surface is proven.
+
+**Drafting-tool roadmap (proposed; refine in discuss when M5+ planning begins):**
+
+| Service | Drafting tool | Lands in |
+|---|---|---|
+| Gather | `templates.draft_from_description` | M5 or M6 — first because Templates have the highest natural-language → structured-input value |
+| Gather | `templates.suggest_improvements` — given an existing Template, propose accessibility/validation/clarity improvements | M6+ |
+| Verify | `flows.draft_from_description` — given "verify ID with credit-bureau check, manual review if score < threshold", produce a Flow definition | M6+ |
+| Calculate | `workbooks.draft_from_description` — given "score a loan application based on income, credit history, debt-to-income", produce a Workbook | M6+ |
+
+Each drafting tool is a phase or two of work in the relevant service, gated on: stable typed content models, sufficient corpus, LLM cost budget approved, evaluation harness in place.
+
+---
+
+## 8. Things to watch / known tensions
 
 - **Policy-chain walk performance:** Walking Template → Workspace → Org on every Link response is one extra join. Fine at v1 scale. If list endpoints become slow, eager-load via SQLAlchemy. Don't over-engineer in M1.
 - **DDB session state in M1:** M1 uses simplified writes (non-atomic) for field changes. **This is acceptable provided it's documented and fixed in M3.** Don't let it slip past. Applies to both REST and MCP — the same use-case function backs both.

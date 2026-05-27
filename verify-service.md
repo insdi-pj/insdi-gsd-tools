@@ -87,9 +87,9 @@ Each entity-phase delivers REST routes AND matching MCP tools in the same PR per
 - **P8 — Polish:** Manual test script for REST (curl) and MCP (Inspector session). OpenAPI + `tools/list` sanity checks.
 
 **Decisions to grill in `/gsd-discuss-phase 1`:**
+- **Confirm the Flow `definition` field uses the typed `insdi-commons` model, not `dict`.** Per principles doc §4, the FlowDefinition shape (steps, transitions, step-type config) comes from `commons.schemas.FlowDefinition` — so MCP's `inputSchema` for `flows.create` carries the full structure (allowed step types, type-specific config via discriminated union) and AI clients can produce valid input on the first try. If commons' current `FlowDefinition` doesn't cover what insdi v2 needs, schedule a commons update — don't shadow locally with `dict`.
 - Embedded vs first-class FlowSteps (Option A vs B above)
-- Flow `definition` JSONB shape — what does a step graph look like? A list of `{ id, type, config, next_step_id }`? A DAG with `dependencies`?
-- Step types in M1 — given no real execution happens, "manual review" is enough; M5+ adds `integration_call`, `branch`, `calculate_run`, `gather_followup`
+- Which step types `FlowDefinition` (in commons) supports today vs which are explicitly M5+. Given no real execution in M1, a `manual` step type may be the only one needed; `integration_call`, `branch`, `calculate_run`, `gather_followup` are M5+ regardless
 - FlowRun `status` enum — `running`, `completed`, `failed`, `cancelled`? Add `awaiting_input` and `paused`?
 - Whether `current_step_id` is a denormalised field or computed from FlowRun's event history (M1 should denormalise — simpler)
 - ID prefixes: `flow_`, `flowstep_` (if first-class), `run_`
@@ -151,6 +151,7 @@ Same shape as Platform and Gather M4.
 - **Step types — Gather follow-up:** A step that publishes `verify.link-requested`; Gather mints a Link and emails the original submitter. The follow-up Submission flows back as input to a subsequent step.
 - **Conditional branching:** Step transitions depend on data values, comparison results, calculate output, etc.
 - **Manual-review steps:** A step that pauses the run until an AdminUser approves/rejects.
+- **`flows.draft_from_description` (M6+, post-stability):** A natural-language → FlowDefinition drafting tool. Admin says *"verify ID with credit-bureau check; manual review if score below threshold; notify submitter of outcome"*; the tool returns a proposed `FlowCreateInput` with rationale and alternatives, which the admin reviews before calling `flows.create`. Backed by insdi-controlled LLM call. **Requires:** typed `FlowDefinition` proven in production, a corpus of successful Flows for few-shot examples, evaluation harness. See `INSDI_GSD_PRINCIPLES.md` §4 for the full drafting-tool progression rationale.
 - **MCP enhancements (M5+ adds new tools as features land):** Each M5+ feature ships its REST routes and matching MCP tools together. `flows.publish` (when versioning lands), event-driven `flow_runs.create` would be triggered externally (no MCP tool — it's an event handler), etc.
 
 ---
